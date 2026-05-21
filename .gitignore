@@ -10,9 +10,10 @@ __pycache__/
 *.db
 *.sqlite3
 
-# Variables d'environnement
+# Variables d'environnement (sauf l'exemple)
 .env
-.env.*
+.env.local
+.env.production
 
 # Artefacts build
 *.egg-info/

@@ -1,16 +1,15 @@
 #!/bin/bash
 # ==============================================================
-# WComply — Script de mise à jour (à relancer après chaque push)
+# WComply — Script de mise à jour (Docker)
 # Usage : bash /opt/wcomply/update.sh
 # ==============================================================
 set -e
 
 APP_DIR="/opt/wcomply"
-SERVICE_NAME="wcomply"
 
 echo ""
 echo "╔══════════════════════════════════════╗"
-echo "║   WComply — Mise à jour              ║"
+echo "║   WComply — Mise à jour (Docker)     ║"
 echo "╚══════════════════════════════════════╝"
 
 # ── 1. Récupérer le code ───────────────────────────────────────
@@ -18,21 +17,25 @@ echo "▶ 1/3 git pull..."
 git -C "$APP_DIR" pull
 echo "  ✓ Code à jour"
 
-# ── 2. Mettre à jour les dépendances ──────────────────────────
+# ── 2. Reconstruire et redémarrer les conteneurs ───────────────
 echo ""
-echo "▶ 2/3 pip install (nouvelles dépendances éventuelles)..."
-"$APP_DIR/venv/bin/pip" install -q -r "$APP_DIR/requirements.txt"
-echo "  ✓ Dépendances à jour"
-
-# ── 3. Redémarrer le service ───────────────────────────────────
-echo ""
-echo "▶ 3/3 Redémarrage du service $SERVICE_NAME..."
-sudo systemctl restart "$SERVICE_NAME"
-sleep 2
-systemctl is-active --quiet "$SERVICE_NAME" && \
-    echo "  ✓ Service redémarré avec succès" || \
-    echo "  ✗ Échec — vérifiez : journalctl -u $SERVICE_NAME -n 30"
+echo "▶ 2/3 Rebuild de l'image app..."
+docker compose -f "$APP_DIR/docker-compose.yml" build app
+echo "  ✓ Image reconstruite"
 
 echo ""
-echo "  Logs en direct : journalctl -u $SERVICE_NAME -f"
+echo "▶ 3/3 Redémarrage des services..."
+docker compose -f "$APP_DIR/docker-compose.yml" up -d
+sleep 3
+
+# Vérification
+if docker compose -f "$APP_DIR/docker-compose.yml" ps | grep -q "running"; then
+    echo "  ✓ Services actifs"
+else
+    echo "  ✗ Problème détecté — vérifiez :"
+    docker compose -f "$APP_DIR/docker-compose.yml" logs --tail=30
+fi
+
+echo ""
+echo "  Logs : docker compose -f $APP_DIR/docker-compose.yml logs -f app"
 echo ""

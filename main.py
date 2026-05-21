@@ -1,78 +1,52 @@
 import io
+import os
 import re
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI, Depends, Request, UploadFile, File, Form, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+import openpyxl
+from bson import ObjectId
+from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, func
-from sqlalchemy.orm import declarative_base, sessionmaker, Session
-import openpyxl
+from pymongo import ASCENDING, DESCENDING, MongoClient
 
-# ── Database ──────────────────────────────────────────────────────────────────
+load_dotenv()
 
-DATABASE_URL = "sqlite:///./wcomply.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+# ── MongoDB ───────────────────────────────────────────────────
+MONGO_URL    = os.getenv("MONGO_URL", "mongodb://localhost:27017")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "wcomply")
 
-
-class AdvisoryNote(Base):
-    __tablename__ = "advisory_notes"
-    id = Column(Integer, primary_key=True, index=True)
-    advisory_release = Column(String, index=True)   # YYYY-MM
-    sap_component = Column(String, nullable=True)
-    reference_note = Column(Integer, unique=True, index=True)
-    version = Column(Integer, default=0)
-    title = Column(String, nullable=True)
-    category = Column(String, nullable=True)        # "Type" in merged view
-    priority_sap = Column(String, nullable=True)
-    cvss_v3_base_score = Column(Float, nullable=True)
-    correction_type = Column(String, nullable=True)
-    recommended_implementation_process = Column(String, nullable=True)
-    downtime_required = Column(String, nullable=True)
+_mongo = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+_db    = _mongo[MONGO_DB_NAME]
 
 
-class FRunEntry(Base):
-    __tablename__ = "frun_entries"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    client = Column(String, index=True)
-    sid = Column(String, index=True)
-    compliant = Column(String, nullable=True)
-    landscape = Column(String, nullable=True)
-    check_description = Column(String, nullable=True)
-    configuration_item = Column(String, nullable=True)
-    value_field = Column(String, nullable=True)
-    policy = Column(String, nullable=True)
-    check_ref = Column(Integer, index=True)         # cleaned col I → joins advisory.reference_note
-    rule = Column(String, nullable=True)
-    valid_since_utc = Column(String, nullable=True)
-    upload_timestamp = Column(DateTime, default=datetime.now)
-    status = Column(String, default="Not Started")
+def get_db():
+    return _db
 
 
-Base.metadata.create_all(bind=engine)
-
-# ── App setup ─────────────────────────────────────────────────────────────────
-
+# ── App ───────────────────────────────────────────────────────
 app = FastAPI(title="WComply")
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-STATUS_VALUES = ["Not Started", "Started", "Implemented", "Validated", "To be checked", "Exception"]
+
+@app.on_event("startup")
+def create_indexes():
+    _db.sap_notes.create_index([("reference_note",   ASCENDING)])
+    _db.sap_notes.create_index([("advisory_release", ASCENDING)])
+    _db.frun_data.create_index([("client",    ASCENDING)])
+    _db.frun_data.create_index([("check_ref", ASCENDING)])
+
+STATUS_VALUES = [
+    "Not Started", "Started", "Implemented",
+    "Validated", "To be checked", "Exception",
+]
 
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-# ── Utilities ─────────────────────────────────────────────────────────────────
+# ── Utilitaires ───────────────────────────────────────────────
 
 def clean_check_ref(value) -> Optional[int]:
     if value is None:
@@ -101,86 +75,79 @@ def format_advisory_release(val) -> Optional[str]:
     return str(val)
 
 
-def apply_dedup(db: Session):
-    """For each reference_note with duplicates, keep only the highest version."""
-    dupes = (
-        db.query(AdvisoryNote.reference_note)
-        .group_by(AdvisoryNote.reference_note)
-        .having(func.count(AdvisoryNote.id) > 1)
-        .all()
-    )
-    for (ref_note,) in dupes:
-        rows = (
-            db.query(AdvisoryNote)
-            .filter(AdvisoryNote.reference_note == ref_note)
-            .order_by(AdvisoryNote.version.desc())
-            .all()
-        )
-        for row in rows[1:]:
-            db.delete(row)
-    db.commit()
+def apply_dedup(db):
+    """Pour chaque reference_note, ne garder que la version la plus haute."""
+    pipeline = [
+        {"$sort": {"version": DESCENDING}},
+        {"$group": {
+            "_id": "$reference_note",
+            "keep_id": {"$first": "$_id"},
+            "count":   {"$sum": 1},
+        }},
+        {"$match": {"count": {"$gt": 1}}},
+    ]
+    for group in db.sap_notes.aggregate(pipeline):
+        db.sap_notes.delete_many({
+            "reference_note": group["_id"],
+            "_id": {"$ne": group["keep_id"]},
+        })
 
 
-def build_merged_entries(db: Session, client=None, sid=None, reference=None):
-    query = db.query(FRunEntry, AdvisoryNote).outerjoin(
-        AdvisoryNote, FRunEntry.check_ref == AdvisoryNote.reference_note
-    )
+def build_merged_entries(db, client=None, sid=None, reference=None) -> list:
+    filt: dict = {}
     if client:
-        query = query.filter(FRunEntry.client.ilike(f"%{client}%"))
+        filt["client"] = {"$regex": re.escape(client), "$options": "i"}
     if sid:
-        query = query.filter(FRunEntry.sid.ilike(f"%{sid}%"))
+        filt["sid"] = {"$regex": re.escape(sid), "$options": "i"}
     if reference:
         ref_num = clean_check_ref(reference)
         if ref_num:
-            query = query.filter(FRunEntry.check_ref == ref_num)
+            filt["check_ref"] = ref_num
+
+    frun_list = list(
+        db.frun_data.find(filt).sort([("client", ASCENDING), ("sid", ASCENDING)])
+    )
+    if not frun_list:
+        return []
+
+    # Charger les notes Advisory correspondantes en une seule requête
+    check_refs = list({e["check_ref"] for e in frun_list if e.get("check_ref")})
+    advisory_map: dict = {}
+    if check_refs:
+        for note in db.sap_notes.find({"reference_note": {"$in": check_refs}}):
+            advisory_map[note["reference_note"]] = note
 
     results = []
-    for frun, advisory in query.order_by(FRunEntry.client, FRunEntry.sid).all():
-        score = advisory.cvss_v3_base_score if advisory else None
+    for frun in frun_list:
+        adv   = advisory_map.get(frun.get("check_ref"))
+        score = adv.get("cvss_v3_base_score") if adv else None
         results.append({
-            "id": frun.id,
-            "client": frun.client,
-            "priority": calculate_priority(score),
-            "sid": frun.sid,
-            "status": frun.status,
-            "check_description": frun.check_description,
-            "policy": frun.policy,
-            "correction_type": advisory.correction_type if advisory else None,
-            "reference": advisory.reference_note if advisory else frun.check_ref,
-            "type": advisory.category if advisory else None,
-            "recommended_implementation_process": advisory.recommended_implementation_process if advisory else None,
-            "downtime_required": advisory.downtime_required if advisory else None,
-            "landscape": frun.landscape,
-            "configuration_item": frun.configuration_item,
-            "value": frun.value_field,
-            "rule": frun.rule,
-            "valid_since_utc": frun.valid_since_utc,
-            "upload_timestamp": frun.upload_timestamp.strftime("%Y-%m-%d %H:%M") if frun.upload_timestamp else None,
-            "cvss_score": score,
+            "id":             str(frun["_id"]),
+            "client":         frun.get("client"),
+            "priority":       calculate_priority(score),
+            "sid":            frun.get("sid"),
+            "status":         frun.get("status", "Not Started"),
+            "comment":        frun.get("comment", ""),
+            "status_history": frun.get("status_history", []),
+            "check_description":               frun.get("check_description"),
+            "policy":                          frun.get("policy"),
+            "correction_type":                 adv.get("correction_type")                 if adv else None,
+            "reference":                       adv.get("reference_note")                  if adv else frun.get("check_ref"),
+            "type":                            adv.get("category")                        if adv else None,
+            "recommended_implementation_process": adv.get("recommended_implementation_process") if adv else None,
+            "downtime_required":               adv.get("downtime_required")               if adv else None,
+            "landscape":          frun.get("landscape"),
+            "configuration_item": frun.get("configuration_item"),
+            "value":              frun.get("value"),
+            "rule":               frun.get("rule"),
+            "valid_since_utc":    frun.get("valid_since_utc"),
+            "upload_timestamp":   frun.get("imported_at"),
+            "cvss_score":         score,
         })
     return results
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
-
-@app.get("/", response_class=HTMLResponse)
-def index(request: Request, db: Session = Depends(get_db)):
-    advisory_count = db.query(func.count(AdvisoryNote.id)).scalar()
-    frun_count = db.query(func.count(FRunEntry.id)).scalar()
-    clients = db.query(FRunEntry.client).distinct().count()
-    max_release = db.query(func.max(AdvisoryNote.advisory_release)).scalar()
-    return templates.TemplateResponse(request, "index.html", {
-        "advisory_count": advisory_count,
-        "frun_count": frun_count,
-        "clients": clients,
-        "max_release": max_release or "—",
-    })
-
-
-# ── Advisory upload ───────────────────────────────────────────────────────────
-
 def _next_release(current: Optional[str]) -> Optional[str]:
-    """Given 'YYYY-MM', return the following month string."""
     if not current or current == "—":
         return None
     try:
@@ -191,29 +158,97 @@ def _next_release(current: Optional[str]) -> Optional[str]:
         return None
 
 
+def _client_summary(entries: list, client: str) -> dict:
+    total = len(entries)
+    p1 = sum(1 for e in entries if e["priority"] == "P1")
+    p2 = sum(1 for e in entries if e["priority"] == "P2")
+    p3 = sum(1 for e in entries if e["priority"] == "P3")
+
+    by_status: dict[str, int] = {}
+    for e in entries:
+        by_status[e["status"]] = by_status.get(e["status"], 0) + 1
+
+    done        = sum(1 for e in entries if e["status"] in ("Validated", "Implemented"))
+    in_progress = sum(1 for e in entries if e["status"] == "Started")
+    not_started = by_status.get("Not Started", 0)
+    progress_pct = round(done / total * 100) if total else 0
+
+    critical = [e for e in entries if e["priority"] == "P1"
+                and e["status"] in ("Not Started", "Started")]
+
+    sid_map: dict = {}
+    for e in entries:
+        sid = e["sid"] or "—"
+        if sid not in sid_map:
+            sid_map[sid] = {"sid": sid, "total": 0, "p1": 0, "p2": 0, "p3": 0,
+                            "done": 0, "by_status": {}}
+        d = sid_map[sid]
+        d["total"] += 1
+        if e["priority"] == "P1":   d["p1"] += 1
+        elif e["priority"] == "P2": d["p2"] += 1
+        elif e["priority"] == "P3": d["p3"] += 1
+        if e["status"] in ("Validated", "Implemented"): d["done"] += 1
+        d["by_status"][e["status"]] = d["by_status"].get(e["status"], 0) + 1
+
+    for d in sid_map.values():
+        d["progress_pct"] = round(d["done"] / d["total"] * 100) if d["total"] else 0
+
+    return {
+        "client": client, "total": total,
+        "p1": p1, "p2": p2, "p3": p3,
+        "no_score": total - p1 - p2 - p3,
+        "by_status": by_status,
+        "done": done, "in_progress": in_progress, "not_started": not_started,
+        "progress_pct": progress_pct,
+        "critical_count": len(critical),
+        "sid_breakdown": sorted(sid_map.values(), key=lambda x: (-x["p1"], -x["total"])),
+        "sids": [d["sid"] for d in sorted(sid_map.values(), key=lambda x: (-x["p1"], -x["total"]))],
+    }
+
+
+# ── Routes : Dashboard ────────────────────────────────────────
+
+@app.get("/", response_class=HTMLResponse)
+def index(request: Request, db=Depends(get_db)):
+    advisory_count = db.sap_notes.count_documents({})
+    frun_count     = db.frun_data.count_documents({})
+    clients        = len(db.frun_data.distinct("client"))
+    doc = db.sap_notes.find_one({}, sort=[("advisory_release", DESCENDING)])
+    max_release = doc["advisory_release"] if doc else "—"
+    return templates.TemplateResponse(request, "index.html", {
+        "advisory_count": advisory_count,
+        "frun_count":     frun_count,
+        "clients":        clients,
+        "max_release":    max_release,
+    })
+
+
+# ── Routes : Advisory ─────────────────────────────────────────
+
 @app.get("/advisory", response_class=HTMLResponse)
-def advisory_page(request: Request, msg: str = "", db: Session = Depends(get_db)):
-    count = db.query(func.count(AdvisoryNote.id)).scalar()
-    max_release = db.query(func.max(AdvisoryNote.advisory_release)).scalar()
-    mr = max_release or "—"
+def advisory_page(request: Request, msg: str = "", db=Depends(get_db)):
+    count = db.sap_notes.count_documents({})
+    doc   = db.sap_notes.find_one({}, sort=[("advisory_release", DESCENDING)])
+    mr    = doc["advisory_release"] if doc else "—"
     return templates.TemplateResponse(request, "advisory.html", {
-        "count": count,
-        "max_release": mr,
-        "next_release": _next_release(max_release),
-        "msg": msg,
+        "count":        count,
+        "max_release":  mr,
+        "next_release": _next_release(mr if mr != "—" else None),
+        "msg":          msg,
     })
 
 
 @app.post("/advisory/upload")
-async def upload_advisory(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
     content = await file.read()
     try:
         wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
     except Exception as e:
-        return RedirectResponse(f"/advisory?msg=Erreur+lecture+fichier:+{e}", status_code=303)
+        return RedirectResponse(f"/advisory?msg=Erreur+fichier:+{e}", status_code=303)
 
     ws = wb.active
-    max_release = db.query(func.max(AdvisoryNote.advisory_release)).scalar()
+    doc = db.sap_notes.find_one({}, sort=[("advisory_release", DESCENDING)])
+    max_release = doc["advisory_release"] if doc else None
 
     new_rows: dict[int, dict] = {}
     skipped = 0
@@ -222,8 +257,6 @@ async def upload_advisory(file: UploadFile = File(...), db: Session = Depends(ge
         advisory_release = format_advisory_release(row[0])
         if not advisory_release:
             continue
-
-        # Monthly update: skip already-loaded releases
         if max_release and advisory_release <= max_release:
             skipped += 1
             continue
@@ -243,234 +276,266 @@ async def upload_advisory(file: UploadFile = File(...), db: Session = Depends(ge
 
         cvss = row[11]
         if isinstance(cvss, str):
-            try:
-                cvss = float(cvss)
-            except Exception:
-                cvss = None
+            try: cvss = float(cvss)
+            except Exception: cvss = None
         elif cvss is not None:
             cvss = float(cvss)
 
-        def _str(v):
-            return str(v).strip() if v is not None else None
+        def _s(v): return str(v).strip() if v is not None else None
 
         data = {
             "advisory_release": advisory_release,
-            "sap_component": _str(row[1]),
-            "reference_note": reference_note,
-            "version": version,
-            "title": _str(row[4]),
-            "category": _str(row[5]),
-            "priority_sap": _str(row[6]),
+            "sap_component":    _s(row[1]),
+            "reference_note":   reference_note,
+            "version":          version,
+            "title":            _s(row[4]),
+            "category":         _s(row[5]),
+            "priority_sap":     _s(row[6]),
             "cvss_v3_base_score": cvss,
-            "correction_type": _str(row[34]),
-            "recommended_implementation_process": _str(row[35]),
-            "downtime_required": _str(row[36]),
+            "correction_type":                 _s(row[34]),
+            "recommended_implementation_process": _s(row[35]),
+            "downtime_required": _s(row[36]),
         }
 
-        # In-memory dedup: keep highest version
         if reference_note not in new_rows or version > new_rows[reference_note]["version"]:
             new_rows[reference_note] = data
 
     added = updated = 0
     for ref, data in new_rows.items():
-        existing = db.query(AdvisoryNote).filter(AdvisoryNote.reference_note == ref).first()
+        existing = db.sap_notes.find_one({"reference_note": ref})
         if existing:
-            if data["version"] > existing.version:
-                for k, v in data.items():
-                    setattr(existing, k, v)
+            if data["version"] > existing.get("version", 0):
+                db.sap_notes.replace_one({"reference_note": ref}, data)
                 updated += 1
         else:
-            db.add(AdvisoryNote(**data))
+            db.sap_notes.insert_one(data)
             added += 1
 
-    db.commit()
     apply_dedup(db)
-
-    msg = f"{added} notes ajoutées, {updated} mises à jour, {skipped} lignes ignorées (déjà chargées)"
+    msg = f"{added} notes ajoutées, {updated} mises à jour, {skipped} ignorées"
     return RedirectResponse(f"/advisory?msg={msg}", status_code=303)
 
 
-# ── FRun upload ───────────────────────────────────────────────────────────────
+# ── Routes : FRun ─────────────────────────────────────────────
 
 @app.get("/frun", response_class=HTMLResponse)
-def frun_page(request: Request, msg: str = "", db: Session = Depends(get_db)):
-    count = db.query(func.count(FRunEntry.id)).scalar()
-    clients = db.query(FRunEntry.client).distinct().all()
+def frun_page(request: Request, msg: str = "", db=Depends(get_db)):
+    count   = db.frun_data.count_documents({})
+    clients = db.frun_data.distinct("client")
     return templates.TemplateResponse(request, "frun.html", {
-        "count": count,
-        "clients": [c[0] for c in clients],
-        "msg": msg,
+        "count":   count,
+        "clients": sorted(clients),
+        "msg":     msg,
     })
 
 
 @app.post("/frun/upload")
-async def upload_frun(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def upload_frun(file: UploadFile = File(...), db=Depends(get_db)):
     content = await file.read()
     try:
         wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
     except Exception as e:
-        return RedirectResponse(f"/frun?msg=Erreur+lecture+fichier:+{e}", status_code=303)
+        return RedirectResponse(f"/frun?msg=Erreur+fichier:+{e}", status_code=303)
 
-    ws = wb["Sheet1"] if "Sheet1" in wb.sheetnames else wb.active
-    now = datetime.now()
-    added = 0
+    ws  = wb["Sheet1"] if "Sheet1" in wb.sheetnames else wb.active
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    docs = []
 
     for row in ws.iter_rows(min_row=2, values_only=True):
         client = str(row[0]).strip() if row[0] else None
         if not client:
             continue
+        def _s(v): return str(v).strip() if v is not None else None
+        docs.append({
+            "client":             client,
+            "sid":                _s(row[1]),
+            "compliant":          _s(row[2]),
+            "landscape":          _s(row[3]),
+            "check_description":  _s(row[4]),
+            "configuration_item": _s(row[5]),
+            "value":              _s(row[6]),
+            "policy":             _s(row[7]),
+            "check_ref":          clean_check_ref(row[8]),
+            "rule":               _s(row[9]),
+            "valid_since_utc":    _s(row[10]),
+            "imported_at":        now,
+            "status":             "Not Started",
+            "comment":            "",
+            "status_history":     [],
+        })
 
-        check_ref = clean_check_ref(row[8])
+    if docs:
+        db.frun_data.insert_many(docs)
 
-        def _str(v):
-            return str(v).strip() if v is not None else None
-
-        entry = FRunEntry(
-            client=client,
-            sid=_str(row[1]),
-            compliant=_str(row[2]),
-            landscape=_str(row[3]),
-            check_description=_str(row[4]),
-            configuration_item=_str(row[5]),
-            value_field=_str(row[6]),
-            policy=_str(row[7]),
-            check_ref=check_ref,
-            rule=_str(row[9]),
-            valid_since_utc=_str(row[10]),
-            upload_timestamp=now,
-            status="Not Started",
-        )
-        db.add(entry)
-        added += 1
-
-    db.commit()
-    msg = f"{added} entrées importées le {now.strftime('%Y-%m-%d %H:%M')}"
+    msg = f"{len(docs)} entrées importées le {now}"
     return RedirectResponse(f"/frun?msg={msg}", status_code=303)
 
 
-# ── Merged view ───────────────────────────────────────────────────────────────
+# ── Routes : Vue fusionnée ────────────────────────────────────
 
 @app.get("/merged", response_class=HTMLResponse)
 def merged_view(
     request: Request,
-    client: str = "",
-    sid: str = "",
-    reference: str = "",
-    db: Session = Depends(get_db),
+    client: str = "", sid: str = "", reference: str = "",
+    db=Depends(get_db),
 ):
     entries = build_merged_entries(db, client or None, sid or None, reference or None)
-    clients = [c[0] for c in db.query(FRunEntry.client).distinct().order_by(FRunEntry.client).all()]
+    clients = sorted(db.frun_data.distinct("client"))
     return templates.TemplateResponse(request, "merged.html", {
-        "entries": entries,
-        "status_values": STATUS_VALUES,
-        "filter_client": client,
-        "filter_sid": sid,
+        "entries":          entries,
+        "status_values":    STATUS_VALUES,
+        "filter_client":    client,
+        "filter_sid":       sid,
         "filter_reference": reference,
-        "clients": clients,
-        "total": len(entries),
+        "clients":          clients,
+        "total":            len(entries),
     })
 
 
+@app.get("/merged/export")
+def export_merged(
+    client: str = "", sid: str = "", reference: str = "",
+    db=Depends(get_db),
+):
+    """Exporte la vue filtrée en fichier .xlsx."""
+    entries = build_merged_entries(db, client or None, sid or None, reference or None)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Vulnérabilités"
+
+    headers = [
+        "Client", "SID", "Priorité", "Référence", "Statut", "Commentaire",
+        "Check Description", "Policy", "Type", "Correction Type",
+        "Process recommandé", "Downtime", "Landscape",
+        "Configuration Item", "Value", "Rule", "Valid since (UTC)", "Importé le",
+    ]
+    ws.append(headers)
+
+    for e in entries:
+        ws.append([
+            e.get("client"), e.get("sid"), e.get("priority"), e.get("reference"),
+            e.get("status"), e.get("comment"), e.get("check_description"),
+            e.get("policy"), e.get("type"), e.get("correction_type"),
+            e.get("recommended_implementation_process"), e.get("downtime_required"),
+            e.get("landscape"), e.get("configuration_item"),
+            e.get("value"), e.get("rule"),
+            e.get("valid_since_utc"), e.get("upload_timestamp"),
+        ])
+
+    # Style en-têtes
+    from openpyxl.styles import Font, PatternFill, Alignment
+    header_fill = PatternFill("solid", fgColor="1E2338")
+    for cell in ws[1]:
+        cell.font      = Font(bold=True, color="DDEEFF")
+        cell.fill      = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    for col in ws.columns:
+        ws.column_dimensions[col[0].column_letter].width = max(
+            len(str(cell.value or "")) for cell in col
+        ) + 4
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    fname = f"wcomply_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+# ── Routes : Entrées (statut, commentaire) ────────────────────
+
 @app.post("/entries/{entry_id}/status")
-def update_status(entry_id: int, request_data: dict, db: Session = Depends(get_db)):
-    entry = db.query(FRunEntry).filter(FRunEntry.id == entry_id).first()
+def update_status(entry_id: str, request_data: dict, db=Depends(get_db)):
+    try:
+        oid = ObjectId(entry_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID invalide")
+
+    entry = db.frun_data.find_one({"_id": oid})
     if not entry:
-        raise HTTPException(status_code=404, detail="Entry not found")
+        raise HTTPException(status_code=404, detail="Entrée introuvable")
+
     new_status = request_data.get("status", "")
     if new_status not in STATUS_VALUES:
-        raise HTTPException(status_code=400, detail="Invalid status")
-    entry.status = new_status
-    db.commit()
+        raise HTTPException(status_code=400, detail="Statut invalide")
+
+    old_status = entry.get("status", "Not Started")
+    db.frun_data.update_one(
+        {"_id": oid},
+        {
+            "$set": {"status": new_status},
+            "$push": {"status_history": {
+                "from":       old_status,
+                "to":         new_status,
+                "changed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }},
+        },
+    )
     return {"ok": True, "status": new_status}
 
 
-# ── Visualization ─────────────────────────────────────────────────────────────
+@app.post("/entries/{entry_id}/comment")
+def update_comment(entry_id: str, request_data: dict, db=Depends(get_db)):
+    try:
+        oid = ObjectId(entry_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID invalide")
 
-def _client_summary(entries: list, client: str) -> dict:
-    """Compute full analysis stats for one client's entries."""
-    total = len(entries)
-    p1 = sum(1 for e in entries if e["priority"] == "P1")
-    p2 = sum(1 for e in entries if e["priority"] == "P2")
-    p3 = sum(1 for e in entries if e["priority"] == "P3")
-    no_score = total - p1 - p2 - p3
+    comment = request_data.get("comment", "")
+    result  = db.frun_data.update_one({"_id": oid}, {"$set": {"comment": comment}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Entrée introuvable")
+    return {"ok": True}
 
-    by_status: dict[str, int] = {}
-    for e in entries:
-        by_status[e["status"]] = by_status.get(e["status"], 0) + 1
 
-    done = sum(1 for e in entries if e["status"] in ("Validated", "Implemented"))
-    in_progress = sum(1 for e in entries if e["status"] == "Started")
-    not_started = by_status.get("Not Started", 0)
-    progress_pct = round(done / total * 100) if total else 0
+@app.get("/entries/{entry_id}/history")
+def get_history(entry_id: str, db=Depends(get_db)):
+    try:
+        oid = ObjectId(entry_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID invalide")
 
-    # P1 items not yet closed
-    critical = [e for e in entries if e["priority"] == "P1" and e["status"] in ("Not Started", "Started")]
+    entry = db.frun_data.find_one({"_id": oid}, {"status_history": 1})
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entrée introuvable")
+    return {"history": entry.get("status_history", [])}
 
-    # Per-SID breakdown
-    sid_map: dict[str, dict] = {}
-    for e in entries:
-        sid = e["sid"] or "—"
-        if sid not in sid_map:
-            sid_map[sid] = {"sid": sid, "total": 0, "p1": 0, "p2": 0, "p3": 0, "done": 0, "by_status": {}}
-        d = sid_map[sid]
-        d["total"] += 1
-        if e["priority"] == "P1":   d["p1"] += 1
-        elif e["priority"] == "P2": d["p2"] += 1
-        elif e["priority"] == "P3": d["p3"] += 1
-        if e["status"] in ("Validated", "Implemented"): d["done"] += 1
-        d["by_status"][e["status"]] = d["by_status"].get(e["status"], 0) + 1
 
-    for d in sid_map.values():
-        d["progress_pct"] = round(d["done"] / d["total"] * 100) if d["total"] else 0
-
-    sid_breakdown = sorted(sid_map.values(), key=lambda x: (-x["p1"], -x["total"]))
-    sids = [d["sid"] for d in sid_breakdown]
-
-    return {
-        "client": client,
-        "total": total,
-        "p1": p1, "p2": p2, "p3": p3, "no_score": no_score,
-        "by_status": by_status,
-        "done": done,
-        "in_progress": in_progress,
-        "not_started": not_started,
-        "progress_pct": progress_pct,
-        "critical_count": len(critical),
-        "sid_breakdown": sid_breakdown,
-        "sids": sids,
-    }
-
+# ── Routes : Visualisation ────────────────────────────────────
 
 @app.get("/view", response_class=HTMLResponse)
-def view(request: Request, client: str = "", db: Session = Depends(get_db)):
-    all_clients = [c[0] for c in db.query(FRunEntry.client).distinct().order_by(FRunEntry.client).all()]
+def view(request: Request, client: str = "", db=Depends(get_db)):
+    all_clients = sorted(db.frun_data.distinct("client"))
 
     summary = []
     for c in all_clients:
         entries = build_merged_entries(db, client=c)
         summary.append(_client_summary(entries, c))
 
-    # Global KPIs across every entry
     all_entries = build_merged_entries(db)
     g_total = len(all_entries)
-    g_p1 = sum(1 for e in all_entries if e["priority"] == "P1")
-    g_p2 = sum(1 for e in all_entries if e["priority"] == "P2")
-    g_p3 = sum(1 for e in all_entries if e["priority"] == "P3")
-    g_done = sum(1 for e in all_entries if e["status"] in ("Validated", "Implemented"))
-    g_ns   = sum(1 for e in all_entries if e["status"] == "Not Started")
-    g_prog = round(g_done / g_total * 100) if g_total else 0
+    g_p1    = sum(1 for e in all_entries if e["priority"] == "P1")
+    g_p2    = sum(1 for e in all_entries if e["priority"] == "P2")
+    g_p3    = sum(1 for e in all_entries if e["priority"] == "P3")
+    g_done  = sum(1 for e in all_entries if e["status"] in ("Validated", "Implemented"))
+    g_ns    = sum(1 for e in all_entries if e["status"] == "Not Started")
 
-    # Global status pipeline
-    pipeline_order = ["Not Started", "Started", "Implemented", "Validated", "To be checked", "Exception"]
-    g_by_status = {}
+    pipeline_order = ["Not Started","Started","Implemented","Validated","To be checked","Exception"]
+    g_by_status: dict[str, int] = {}
     for e in all_entries:
         g_by_status[e["status"]] = g_by_status.get(e["status"], 0) + 1
-    g_pipeline = [{"label": s, "count": g_by_status.get(s, 0)} for s in pipeline_order]
 
     global_stats = {
         "total": g_total, "p1": g_p1, "p2": g_p2, "p3": g_p3,
-        "done": g_done, "not_started": g_ns, "progress_pct": g_prog,
-        "pipeline": g_pipeline,
+        "done": g_done, "not_started": g_ns,
+        "progress_pct": round(g_done / g_total * 100) if g_total else 0,
+        "pipeline": [{"label": s, "count": g_by_status.get(s, 0)} for s in pipeline_order],
         "clients": len(all_clients),
     }
 
@@ -481,12 +546,12 @@ def view(request: Request, client: str = "", db: Session = Depends(get_db)):
         selected_summary = next((s for s in summary if s["client"] == client), None)
 
     return templates.TemplateResponse(request, "view.html", {
-        "summary": summary,
-        "global_stats": global_stats,
-        "selected_client": client,
+        "summary":          summary,
+        "global_stats":     global_stats,
+        "selected_client":  client,
         "selected_entries": selected_entries,
         "selected_summary": selected_summary,
-        "status_values": STATUS_VALUES,
-        "all_clients": all_clients,
-        "pipeline_order": pipeline_order,
+        "status_values":    STATUS_VALUES,
+        "all_clients":      all_clients,
+        "pipeline_order":   pipeline_order,
     })
