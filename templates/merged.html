@@ -13,7 +13,7 @@
   <p class="page-subtitle">Advisory × FRun · Filtrage, suivi des statuts et export</p>
 </div>
 
-<!-- Filter bar -->
+<!-- ── Filter bar + Export button ─────────────────────────── -->
 <div class="filter-bar">
   <form method="get" action="/merged" style="display:contents;">
     <div class="filter-group">
@@ -41,7 +41,7 @@
         Filtrer
       </button>
       {% if filter_client or filter_sid or filter_reference %}
-      <a href="/merged" class="btn btn-ghost btn-sm">
+      <a href="/merged" class="btn btn-ghost btn-sm" title="Réinitialiser">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
         </svg>
@@ -49,33 +49,37 @@
       {% endif %}
     </div>
   </form>
+
+  <!-- Séparateur vertical -->
+  <div style="width:1px; height:34px; background:var(--border); align-self:flex-end; margin:0 6px 0 2px; flex-shrink:0;"></div>
+
+  <!-- Bouton Export — à côté des filtres, utilise les filtres appliqués -->
+  <div style="align-self:flex-end;">
+    <a href="/merged/export?client={{ filter_client | urlencode }}&sid={{ filter_sid | urlencode }}&reference={{ filter_reference | urlencode }}"
+       class="btn btn-outline btn-sm"
+       title="Exporter la sélection en Excel (.xlsx)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="7 10 12 15 17 10"/>
+        <line x1="12" y1="15" x2="12" y2="3"/>
+      </svg>
+      Exporter Excel
+    </a>
+  </div>
 </div>
 
 {% if entries %}
-<!-- Summary + export button -->
-<div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
-  <div class="table-summary">
-    <span class="table-summary-count"><strong>{{ total }}</strong> entrée{{ 's' if total != 1 }}</span>
-    <div class="prio-summary">
-      {% set p1_n = entries | selectattr('priority','eq','P1') | list | length %}
-      {% set p2_n = entries | selectattr('priority','eq','P2') | list | length %}
-      {% set p3_n = entries | selectattr('priority','eq','P3') | list | length %}
-      {% if p1_n %}<span class="badge badge-p1">P1 · {{ p1_n }}</span>{% endif %}
-      {% if p2_n %}<span class="badge badge-p2">P2 · {{ p2_n }}</span>{% endif %}
-      {% if p3_n %}<span class="badge badge-p3">P3 · {{ p3_n }}</span>{% endif %}
-    </div>
+<!-- Summary row -->
+<div class="table-summary mb-16">
+  <span class="table-summary-count"><strong>{{ total }}</strong> entrée{{ 's' if total != 1 }}</span>
+  <div class="prio-summary">
+    {% set p1_n = entries | selectattr('priority','eq','P1') | list | length %}
+    {% set p2_n = entries | selectattr('priority','eq','P2') | list | length %}
+    {% set p3_n = entries | selectattr('priority','eq','P3') | list | length %}
+    {% if p1_n %}<span class="badge badge-p1">P1 · {{ p1_n }}</span>{% endif %}
+    {% if p2_n %}<span class="badge badge-p2">P2 · {{ p2_n }}</span>{% endif %}
+    {% if p3_n %}<span class="badge badge-p3">P3 · {{ p3_n }}</span>{% endif %}
   </div>
-
-  <!-- Export button -->
-  <a href="/merged/export?client={{ filter_client | urlencode }}&sid={{ filter_sid | urlencode }}&reference={{ filter_reference | urlencode }}"
-     class="btn btn-outline btn-sm" title="Exporter la sélection en Excel">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-      <polyline points="7 10 12 15 17 10"/>
-      <line x1="12" y1="15" x2="12" y2="3"/>
-    </svg>
-    Exporter Excel
-  </a>
 </div>
 
 <div class="table-wrapper">
@@ -87,26 +91,27 @@
         <th class="col-sid">SID</th>
         <th class="col-ref">Référence</th>
         <th class="col-status">Statut</th>
-        <th style="min-width:180px;">Commentaire</th>
         <th class="col-desc">Check Description</th>
-        <th class="col-text">Type</th>
+        <th class="col-text">Policy</th>
         <th class="col-text">Correction Type</th>
         <th style="min-width:180px;">Process recommandé</th>
         <th class="col-short">Downtime</th>
-        <th class="col-text">Policy</th>
         <th class="col-text">Landscape</th>
         <th style="min-width:160px;">Configuration Item</th>
         <th class="col-text">Value</th>
         <th class="col-short">Rule</th>
         <th class="col-dt">Valid since</th>
         <th class="col-dt">Importé le</th>
+        <th style="min-width:200px;">Commentaire</th>
       </tr>
     </thead>
     <tbody>
       {% for e in entries %}
       <tr>
+        <!-- Client -->
         <td class="col-sticky col-sticky-0 fw-600">{{ e.client or '—' }}</td>
 
+        <!-- Priority -->
         <td>
           {% if e.priority == 'P1' %}<span class="badge badge-p1">P1</span>
           {% elif e.priority == 'P2' %}<span class="badge badge-p2">P2</span>
@@ -114,6 +119,7 @@
           {% else %}<span class="cell-dim">—</span>{% endif %}
         </td>
 
+        <!-- SID / Reference -->
         <td><span class="cell-mono">{{ e.sid or '—' }}</span></td>
         <td><span class="cell-mono">{{ e.reference or '—' }}</span></td>
 
@@ -137,7 +143,6 @@
             </button>
             {% endif %}
           </div>
-          <!-- Popup historique (caché par défaut) -->
           <div class="history-popup" id="hist-{{ e.id }}">
             <div class="history-popup-title">Historique des statuts</div>
             {% for h in e.status_history | reverse %}
@@ -149,7 +154,24 @@
           </div>
         </td>
 
-        <!-- Commentaire -->
+        <!-- Données Advisory / FRun -->
+        <td><span class="cell-truncate" style="display:block;max-width:230px;" title="{{ e.check_description or '' }}">{{ e.check_description or '—' }}</span></td>
+        <td><span class="cell-truncate" style="display:block;max-width:140px;">{{ e.policy or '—' }}</span></td>
+        <td><span class="cell-truncate" style="display:block;max-width:150px;" title="{{ e.correction_type or '' }}">{{ e.correction_type or '—' }}</span></td>
+        <td><span class="cell-truncate" style="display:block;max-width:200px;" title="{{ e.recommended_implementation_process or '' }}">{{ e.recommended_implementation_process or '—' }}</span></td>
+        <td>
+          {% if e.downtime_required == 'Yes' %}<span class="badge badge-yes">Oui</span>
+          {% elif e.downtime_required == 'No' %}<span class="badge badge-no">Non</span>
+          {% else %}<span class="cell-dim">{{ e.downtime_required or '—' }}</span>{% endif %}
+        </td>
+        <td><span class="cell-truncate" style="display:block;max-width:140px;">{{ e.landscape or '—' }}</span></td>
+        <td><span class="cell-truncate" style="display:block;max-width:160px;">{{ e.configuration_item or '—' }}</span></td>
+        <td><span class="cell-truncate cell-mono" style="display:block;max-width:130px;">{{ e.value or '—' }}</span></td>
+        <td><span class="cell-dim">{{ e.rule or '—' }}</span></td>
+        <td><span class="cell-dim" style="white-space:nowrap;">{{ e.valid_since_utc or '—' }}</span></td>
+        <td><span class="cell-dim" style="white-space:nowrap;">{{ e.upload_timestamp or '—' }}</span></td>
+
+        <!-- Commentaire — dernière colonne -->
         <td>
           <input type="text"
                  class="comment-input"
@@ -158,23 +180,6 @@
                  placeholder="Ajouter un commentaire…"
                  onblur="saveComment(this)">
         </td>
-
-        <td><span class="cell-truncate" style="display:block;max-width:230px;" title="{{ e.check_description or '' }}">{{ e.check_description or '—' }}</span></td>
-        <td><span class="cell-truncate" style="display:block;max-width:150px;" title="{{ e.type or '' }}">{{ e.type or '—' }}</span></td>
-        <td><span class="cell-truncate" style="display:block;max-width:150px;" title="{{ e.correction_type or '' }}">{{ e.correction_type or '—' }}</span></td>
-        <td><span class="cell-truncate" style="display:block;max-width:200px;" title="{{ e.recommended_implementation_process or '' }}">{{ e.recommended_implementation_process or '—' }}</span></td>
-        <td>
-          {% if e.downtime_required == 'Yes' %}<span class="badge badge-yes">Oui</span>
-          {% elif e.downtime_required == 'No' %}<span class="badge badge-no">Non</span>
-          {% else %}<span class="cell-dim">{{ e.downtime_required or '—' }}</span>{% endif %}
-        </td>
-        <td><span class="cell-truncate" style="display:block;max-width:140px;">{{ e.policy or '—' }}</span></td>
-        <td><span class="cell-truncate" style="display:block;max-width:140px;">{{ e.landscape or '—' }}</span></td>
-        <td><span class="cell-truncate" style="display:block;max-width:160px;">{{ e.configuration_item or '—' }}</span></td>
-        <td><span class="cell-truncate cell-mono" style="display:block;max-width:130px;">{{ e.value or '—' }}</span></td>
-        <td><span class="cell-dim">{{ e.rule or '—' }}</span></td>
-        <td><span class="cell-dim" style="white-space:nowrap;">{{ e.valid_since_utc or '—' }}</span></td>
-        <td><span class="cell-dim" style="white-space:nowrap;">{{ e.upload_timestamp or '—' }}</span></td>
       </tr>
       {% endfor %}
     </tbody>
@@ -211,7 +216,6 @@ document.querySelectorAll('.status-select').forEach(function(sel) {
         const el = document.getElementById('ok-' + id);
         el.classList.add('show');
         setTimeout(() => el.classList.remove('show'), 2000);
-        // Mettre à jour le badge historique
         refreshHistoryBadge(id);
       }
     } catch(e) { console.error(e); }
@@ -225,25 +229,16 @@ async function refreshHistoryBadge(id) {
   const hist  = data.history || [];
   const popup = document.getElementById('hist-' + id);
   if (!popup) return;
-
-  // Reconstruire le popup
   popup.innerHTML = '<div class="history-popup-title">Historique des statuts</div>' +
     [...hist].reverse().map(h =>
       `<div class="history-entry"><span class="history-date">${h.changed_at}</span><span class="history-arrow">${h.from} → ${h.to}</span></div>`
     ).join('');
-
-  // Mettre à jour le badge
   const btn = document.querySelector('.history-btn[data-id="' + id + '"]');
-  if (btn) {
-    btn.textContent = hist.length;
-    btn.title = hist.length + ' changement' + (hist.length > 1 ? 's' : '');
-  } else if (hist.length > 0) {
-    // Créer le badge si premier changement
-    location.reload();
-  }
+  if (btn) { btn.textContent = hist.length; }
+  else if (hist.length > 0) { location.reload(); }
 }
 
-// ── Commentaire ─────────────────────────────────────────────
+// ── Commentaire (sauvegarde au blur) ────────────────────────
 async function saveComment(input) {
   const id      = input.dataset.id;
   const comment = input.value.trim();
@@ -261,28 +256,19 @@ async function saveComment(input) {
 
 // ── Historique popup ────────────────────────────────────────
 let _openPopup = null;
-
 document.querySelectorAll('.history-btn').forEach(function(btn) {
   btn.addEventListener('click', function(e) {
     e.stopPropagation();
-    const id    = this.dataset.id;
-    const popup = document.getElementById('hist-' + id);
+    const popup = document.getElementById('hist-' + this.dataset.id);
     if (!popup) return;
-
     const isOpen = popup.classList.contains('show');
-    if (_openPopup && _openPopup !== popup) {
-      _openPopup.classList.remove('show');
-    }
+    if (_openPopup && _openPopup !== popup) _openPopup.classList.remove('show');
     popup.classList.toggle('show', !isOpen);
     _openPopup = isOpen ? null : popup;
   });
 });
-
 document.addEventListener('click', function() {
-  if (_openPopup) {
-    _openPopup.classList.remove('show');
-    _openPopup = null;
-  }
+  if (_openPopup) { _openPopup.classList.remove('show'); _openPopup = null; }
 });
 </script>
 {% endblock %}

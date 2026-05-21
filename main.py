@@ -35,10 +35,13 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.on_event("startup")
 def create_indexes():
-    _db.sap_notes.create_index([("reference_note",   ASCENDING)])
-    _db.sap_notes.create_index([("advisory_release", ASCENDING)])
-    _db.frun_data.create_index([("client",    ASCENDING)])
-    _db.frun_data.create_index([("check_ref", ASCENDING)])
+    try:
+        _db.sap_notes.create_index([("reference_note",   ASCENDING)])
+        _db.sap_notes.create_index([("advisory_release", ASCENDING)])
+        _db.frun_data.create_index([("client",    ASCENDING)])
+        _db.frun_data.create_index([("check_ref", ASCENDING)])
+    except Exception as e:
+        print(f"[startup] MongoDB non disponible ({e}). Les index seront créés à la première connexion.")
 
 STATUS_VALUES = [
     "Not Started", "Started", "Implemented",
@@ -397,50 +400,81 @@ def export_merged(
     client: str = "", sid: str = "", reference: str = "",
     db=Depends(get_db),
 ):
-    """Exporte la vue filtrée en fichier .xlsx."""
+    """Exporte la vue filtrée en .xlsx avec mise en forme complète."""
+    from openpyxl.styles import Font, PatternFill, Alignment
+
     entries = build_merged_entries(db, client or None, sid or None, reference or None)
 
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Vulnérabilités"
+    ws.title = "VulnTrack"
 
-    headers = [
-        "Client", "SID", "Priorité", "Référence", "Statut", "Commentaire",
-        "Check Description", "Policy", "Type", "Correction Type",
-        "Process recommandé", "Downtime", "Landscape",
-        "Configuration Item", "Value", "Rule", "Valid since (UTC)", "Importé le",
+    # ── Colonnes dans l'ordre du cahier des charges ────────────
+    COLUMNS = [
+        ("Client",                  lambda e: e.get("client")),
+        ("SID",                     lambda e: e.get("sid")),
+        ("Priority",                lambda e: e.get("priority")),
+        ("Statut",                  lambda e: e.get("status")),
+        ("Reference Note",          lambda e: e.get("reference")),
+        ("Check Description",       lambda e: e.get("check_description")),
+        ("Policy",                  lambda e: e.get("policy")),
+        ("Correction Type",         lambda e: e.get("correction_type")),
+        ("Recommended Process",     lambda e: e.get("recommended_implementation_process")),
+        ("Downtime Required",       lambda e: e.get("downtime_required")),
+        ("Landscape",               lambda e: e.get("landscape")),
+        ("Configuration Item",      lambda e: e.get("configuration_item")),
+        ("Value",                   lambda e: e.get("value")),
+        ("Rule",                    lambda e: e.get("rule")),
+        ("Valid Since",             lambda e: e.get("valid_since_utc")),
+        ("Commentaire",             lambda e: e.get("comment", "")),
     ]
-    ws.append(headers)
+    PRIORITY_COL_IDX = 3   # colonne "Priority" = colonne C (1-based)
 
-    for e in entries:
-        ws.append([
-            e.get("client"), e.get("sid"), e.get("priority"), e.get("reference"),
-            e.get("status"), e.get("comment"), e.get("check_description"),
-            e.get("policy"), e.get("type"), e.get("correction_type"),
-            e.get("recommended_implementation_process"), e.get("downtime_required"),
-            e.get("landscape"), e.get("configuration_item"),
-            e.get("value"), e.get("rule"),
-            e.get("valid_since_utc"), e.get("upload_timestamp"),
-        ])
+    # ── En-têtes ───────────────────────────────────────────────
+    ws.append([col[0] for col in COLUMNS])
 
-    # Style en-têtes
-    from openpyxl.styles import Font, PatternFill, Alignment
-    header_fill = PatternFill("solid", fgColor="1E2338")
+    header_fill = PatternFill("solid", fgColor="FF1E2338")
     for cell in ws[1]:
-        cell.font      = Font(bold=True, color="DDEEFF")
+        cell.font      = Font(bold=True, color="FFFFFF")
         cell.fill      = header_fill
-        cell.alignment = Alignment(horizontal="center")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 18
 
+    # ── Données ────────────────────────────────────────────────
+    for e in entries:
+        ws.append([fn(e) for _, fn in COLUMNS])
+
+    # ── Couleurs P1 / P2 / P3 sur la colonne Priority ─────────
+    PRIO_FILL = {
+        "P1": PatternFill("solid", fgColor="FFC0392B"),   # rouge opaque
+        "P2": PatternFill("solid", fgColor="FFD35400"),   # orange opaque
+        "P3": PatternFill("solid", fgColor="FF27AE60"),   # vert opaque
+    }
+    PRIO_FONT = Font(bold=True, color="FFFFFF")
+
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+        prio_cell = row[PRIORITY_COL_IDX - 1]
+        fill = PRIO_FILL.get(prio_cell.value)
+        if fill:
+            prio_cell.fill = fill
+            prio_cell.font = PRIO_FONT
+
+    # ── Largeur colonnes auto-ajustée ──────────────────────────
     for col in ws.columns:
-        ws.column_dimensions[col[0].column_letter].width = max(
-            len(str(cell.value or "")) for cell in col
-        ) + 4
+        max_len = max(
+            (len(str(cell.value)) for cell in col if cell.value is not None),
+            default=8,
+        )
+        ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 60)
+
+    # ── Figer la première ligne ────────────────────────────────
+    ws.freeze_panes = "A2"
 
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
 
-    fname = f"wcomply_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+    fname = f"VulnTrack_export_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
