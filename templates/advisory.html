@@ -1,0 +1,266 @@
+{% extends "base.html" %}
+{% block title %}WComply — SAP Advisory{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="17 8 12 3 7 8"/>
+      <line x1="12" y1="3" x2="12" y2="15"/>
+    </svg>
+    SAP Security Notes Advisory
+  </h1>
+  <p class="page-subtitle">Téléchargement depuis le SAP Support Portal &amp; import mensuel</p>
+</div>
+
+{% if msg %}
+<div class="alert alert-info">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="12" r="10"/>
+    <line x1="12" y1="8" x2="12" y2="12"/>
+    <line x1="12" y1="16" x2="12.01" y2="16"/>
+  </svg>
+  {{ msg }}
+</div>
+{% endif %}
+
+<!-- ── Release status banner ──────────────────────── -->
+<div class="release-banner">
+  <div class="release-banner-left">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+      <line x1="16" y1="2" x2="16" y2="6"/>
+      <line x1="8" y1="2" x2="8" y2="6"/>
+      <line x1="3" y1="10" x2="21" y2="10"/>
+    </svg>
+    <div>
+      {% if max_release == '—' %}
+        <div class="release-banner-title">Aucune release en base</div>
+        <div class="release-banner-sub">Importez le premier fichier SAP Advisory pour démarrer.</div>
+      {% else %}
+        <div class="release-banner-title">
+          Dernière release en base :
+          <span class="release-tag">{{ max_release }}</span>
+        </div>
+        <div class="release-banner-sub">
+          {% if next_release %}
+            Pensez à charger la release <strong>{{ next_release }}</strong> ou plus récente.
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+  </div>
+  <a href="https://support.sap.com/en/my-support/knowledge-base/security-notes-news.html"
+     target="_blank" rel="noopener noreferrer"
+     class="btn btn-portal">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/>
+      <line x1="2" y1="12" x2="22" y2="12"/>
+      <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+    </svg>
+    Accéder au SAP Support Portal
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px;opacity:.7;">
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+      <polyline points="15 3 21 3 21 9"/>
+      <line x1="10" y1="14" x2="21" y2="3"/>
+    </svg>
+  </a>
+</div>
+
+<!-- ── Main grid ──────────────────────────────────── -->
+<div class="upload-layout">
+
+  <!-- Left : instructions + upload -->
+  <div style="display:flex; flex-direction:column; gap:16px;">
+
+    <!-- Step-by-step instructions -->
+    <div class="card">
+      <div class="card-header">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <polyline points="12 6 12 12 16 14"/>
+        </svg>
+        Comment obtenir le fichier Advisory
+      </div>
+      <div class="card-body" style="padding: 0;">
+        <div class="steps-list">
+
+          <div class="step-item">
+            <div class="step-num">1</div>
+            <div class="step-body">
+              <div class="step-title">Ouvrir le SAP Support Portal</div>
+              <div class="step-desc">Cliquez sur le bouton ci-dessus pour accéder directement à la page Security Notes &amp; News. Connectez-vous avec votre compte SAP S-User si demandé.</div>
+              <a href="https://support.sap.com/en/my-support/knowledge-base/security-notes-news.html"
+                 target="_blank" rel="noopener noreferrer"
+                 class="btn btn-portal btn-sm" style="margin-top:10px; width:fit-content;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+                  <polyline points="15 3 21 3 21 9"/>
+                  <line x1="10" y1="14" x2="21" y2="3"/>
+                </svg>
+                Accéder au SAP Support Portal
+              </a>
+            </div>
+          </div>
+
+          <div class="step-item">
+            <div class="step-num">2</div>
+            <div class="step-body">
+              <div class="step-title">Aller dans "Security Notes &amp; News"</div>
+              <div class="step-desc">Sur le portail, naviguez vers la section <em>My Support → Knowledge Base → Security Notes &amp; News</em>.</div>
+            </div>
+          </div>
+
+          <div class="step-item">
+            <div class="step-num">3</div>
+            <div class="step-body">
+              <div class="step-title">Filtrer &amp; exporter en Excel</div>
+              <div class="step-desc">
+                Filtrez par mois
+                {% if next_release %}(<strong>{{ next_release }}</strong> ou plus récent){% endif %}
+                puis cliquez sur <em>Export to Excel</em> (ou <em>Download</em>). Le fichier téléchargé est le fichier à importer ici.
+              </div>
+            </div>
+          </div>
+
+          <div class="step-item" style="border-bottom: none;">
+            <div class="step-num" style="background: var(--green-bg); color: var(--green); border-color: var(--p3-border);">4</div>
+            <div class="step-body">
+              <div class="step-title">Revenir ici &amp; uploader</div>
+              <div class="step-desc">Glissez-déposez le fichier <code>.xlsx</code> téléchargé dans la zone ci-dessous, puis cliquez sur <em>Lancer l'import</em>.</div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- Upload zone -->
+    <div class="card">
+      <div class="card-header">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        Importer le fichier
+      </div>
+      <div class="card-body">
+        <form action="/advisory/upload" method="post" enctype="multipart/form-data" class="upload-form">
+          <label class="file-zone" id="dropzone-adv">
+            <input type="file" name="file" accept=".xlsx,.xls" required id="file-adv" onchange="updateLabel(this)">
+            <div class="file-zone-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+            </div>
+            <div class="file-zone-title" id="label-adv">Déposer le fichier ici</div>
+            <div class="file-zone-sub">ou <span>cliquer pour parcourir</span> · .xlsx uniquement</div>
+          </label>
+          <button type="submit" class="btn btn-primary">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="20 6 9 17 4 12"/>
+            </svg>
+            Lancer l'import
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right : stats + logic -->
+  <div style="display:flex; flex-direction:column; gap:16px;">
+
+    <!-- Stats -->
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+      <div class="stat-card" style="padding:16px;">
+        <div class="stat-icon blue">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+        </div>
+        <div>
+          <div class="stat-value" style="font-size:24px;">{{ count }}</div>
+          <div class="stat-label">Notes en base</div>
+        </div>
+      </div>
+      <div class="stat-card" style="padding:16px;">
+        <div class="stat-icon green">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+            <line x1="16" y1="2" x2="16" y2="6"/>
+            <line x1="8" y1="2" x2="8" y2="6"/>
+            <line x1="3" y1="10" x2="21" y2="10"/>
+          </svg>
+        </div>
+        <div>
+          <div class="stat-value" style="font-size:24px;">{{ max_release }}</div>
+          <div class="stat-label">Dernière release</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Dedup logic -->
+    <div class="card">
+      <div class="card-header">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="12" y1="8" x2="12" y2="12"/>
+          <line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+        Logique de traitement
+      </div>
+      <div class="card-body">
+        <ul class="info-list">
+          <li><strong>Déduplication</strong> — Si plusieurs lignes ont le même <em>Reference Note</em> (col C), seule celle avec la <em>Version</em> (col D) la plus élevée est conservée.</li>
+          <li><strong>Mise à jour mensuelle</strong> — Seules les lignes dont <em>Advisory Release</em> est postérieure à la dernière release en base sont ajoutées.</li>
+          <li>La déduplication est réappliquée après chaque import.</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- Column mapping -->
+    <div class="card">
+      <div class="card-header">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>
+        Colonnes utilisées
+      </div>
+      <div class="card-body" style="padding:0;">
+        <table class="schema-table">
+          <thead>
+            <tr><th>Col</th><th>Champ</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>A</td><td>Advisory Release (YYYY-MM)</td></tr>
+            <tr><td>C</td><td>Reference Note — clé de jointure</td></tr>
+            <tr><td>D</td><td>Version — déduplication</td></tr>
+            <tr><td>L</td><td>CVSSv3 Base Score → Priorité</td></tr>
+            <tr><td>F</td><td>Category → Type</td></tr>
+            <tr class="highlight"><td>AI</td><td>Correction Type</td></tr>
+            <tr class="highlight"><td>AJ</td><td>Process recommandé</td></tr>
+            <tr class="highlight"><td>AK</td><td>Downtime required</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function updateLabel(input) {
+  const label = document.getElementById('label-adv');
+  if (input.files && input.files[0]) {
+    label.textContent = input.files[0].name;
+  }
+}
+</script>
+{% endblock %}

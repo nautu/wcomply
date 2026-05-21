@@ -1,0 +1,42 @@
+# Environnement Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Base de données locale (persiste sur la VM, ne pas versionner)
+*.db
+*.sqlite3
+
+# Variables d'environnement
+.env
+.env.*
+
+# Artefacts build
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Fichiers temporaires Excel/Office (créés quand un fichier est ouvert)
+~$*
+
+# Fichiers de données source (uploadés dans l'app, pas du code)
+*.xlsx
+*.xls
+*.docx
+*.doc
+
+# Éditeurs / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+Thumbs.db
+
+# Logs
+*.log
+/tmp/

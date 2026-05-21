@@ -1,0 +1,232 @@
+{% extends "base.html" %}
+{% block title %}WComply — Vue fusionnée{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1 class="page-title">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+      <line x1="3" y1="9" x2="21" y2="9"/>
+      <line x1="3" y1="15" x2="21" y2="15"/>
+      <line x1="9" y1="3" x2="9" y2="21"/>
+    </svg>
+    Vue fusionnée
+  </h1>
+  <p class="page-subtitle">Advisory × FRun · Filtrage et mise à jour des statuts</p>
+</div>
+
+<!-- Filter bar -->
+<div class="filter-bar">
+  <form method="get" action="/merged" style="display:contents;">
+    <div class="filter-group">
+      <label class="form-label">Client</label>
+      <select name="client" class="form-control">
+        <option value="">Tous les clients</option>
+        {% for c in clients %}
+        <option value="{{ c }}" {% if filter_client == c %}selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <div class="filter-group" style="max-width:160px;">
+      <label class="form-label">SID</label>
+      <input type="text" name="sid" value="{{ filter_sid }}" class="form-control" placeholder="ex : HED">
+    </div>
+
+    <div class="filter-group" style="max-width:200px;">
+      <label class="form-label">Référence SAP</label>
+      <input type="text" name="reference" value="{{ filter_reference }}" class="form-control" placeholder="ex : 3674774">
+    </div>
+
+    <div class="filter-actions">
+      <button type="submit" class="btn btn-primary btn-sm">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>
+        </svg>
+        Filtrer
+      </button>
+      {% if filter_client or filter_sid or filter_reference %}
+      <a href="/merged" class="btn btn-ghost btn-sm" title="Réinitialiser">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </a>
+      {% endif %}
+    </div>
+  </form>
+</div>
+
+<!-- Summary row -->
+{% if entries %}
+<div class="table-summary">
+  <span class="table-summary-count"><strong>{{ total }}</strong> entrée{{ 's' if total != 1 }}</span>
+  <div class="prio-summary">
+    {% set p1_count = entries | selectattr('priority','eq','P1') | list | length %}
+    {% set p2_count = entries | selectattr('priority','eq','P2') | list | length %}
+    {% set p3_count = entries | selectattr('priority','eq','P3') | list | length %}
+    {% if p1_count %}<span class="badge badge-p1">P1 · {{ p1_count }}</span>{% endif %}
+    {% if p2_count %}<span class="badge badge-p2">P2 · {{ p2_count }}</span>{% endif %}
+    {% if p3_count %}<span class="badge badge-p3">P3 · {{ p3_count }}</span>{% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% if entries %}
+<div class="table-wrapper">
+  <table>
+    <thead>
+      <tr>
+        <th class="col-client col-sticky col-sticky-0">Client</th>
+        <th class="col-prio">Prio.</th>
+        <th class="col-sid">SID</th>
+        <th class="col-ref">Référence</th>
+        <th class="col-status">Statut</th>
+        <th class="col-desc">Check Description</th>
+        <th class="col-text">Type</th>
+        <th class="col-text">Correction Type</th>
+        <th style="min-width:200px">Process recommandé</th>
+        <th class="col-short">Downtime</th>
+        <th class="col-text">Policy</th>
+        <th class="col-text">Landscape</th>
+        <th style="min-width:160px">Configuration Item</th>
+        <th class="col-text">Value</th>
+        <th class="col-short">Rule</th>
+        <th class="col-dt">Valid since</th>
+        <th class="col-dt">Importé le</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in entries %}
+      <tr>
+        <!-- Client (sticky) -->
+        <td class="col-sticky col-sticky-0 fw-600">{{ e.client or '—' }}</td>
+
+        <!-- Priority -->
+        <td>
+          {% if e.priority == 'P1' %}
+            <span class="badge badge-p1">P1</span>
+          {% elif e.priority == 'P2' %}
+            <span class="badge badge-p2">P2</span>
+          {% elif e.priority == 'P3' %}
+            <span class="badge badge-p3">P3</span>
+          {% else %}
+            <span class="cell-dim">—</span>
+          {% endif %}
+        </td>
+
+        <!-- SID -->
+        <td><span class="cell-mono">{{ e.sid or '—' }}</span></td>
+
+        <!-- Référence -->
+        <td><span class="cell-mono">{{ e.reference or '—' }}</span></td>
+
+        <!-- Status (editable) -->
+        <td>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <select class="status-select" data-id="{{ e.id }}">
+              {% for s in status_values %}
+              <option value="{{ s }}" {% if e.status == s %}selected{% endif %}>{{ s }}</option>
+              {% endfor %}
+            </select>
+            <span class="save-ok" id="ok-{{ e.id }}">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+            </span>
+          </div>
+        </td>
+
+        <!-- Check Description -->
+        <td>
+          <span class="cell-truncate" title="{{ e.check_description or '' }}" style="display:block;max-width:230px;">
+            {{ e.check_description or '—' }}
+          </span>
+        </td>
+
+        <!-- Type -->
+        <td><span class="cell-truncate" title="{{ e.type or '' }}" style="display:block;max-width:150px;">{{ e.type or '—' }}</span></td>
+
+        <!-- Correction Type -->
+        <td><span class="cell-truncate" title="{{ e.correction_type or '' }}" style="display:block;max-width:150px;">{{ e.correction_type or '—' }}</span></td>
+
+        <!-- Process -->
+        <td><span class="cell-truncate" title="{{ e.recommended_implementation_process or '' }}" style="display:block;max-width:200px;">{{ e.recommended_implementation_process or '—' }}</span></td>
+
+        <!-- Downtime -->
+        <td>
+          {% if e.downtime_required == 'Yes' %}
+            <span class="badge badge-yes">Oui</span>
+          {% elif e.downtime_required == 'No' %}
+            <span class="badge badge-no">Non</span>
+          {% else %}
+            <span class="cell-dim">{{ e.downtime_required or '—' }}</span>
+          {% endif %}
+        </td>
+
+        <!-- Policy -->
+        <td><span class="cell-truncate" style="display:block;max-width:140px;" title="{{ e.policy or '' }}">{{ e.policy or '—' }}</span></td>
+
+        <!-- Landscape -->
+        <td><span class="cell-truncate" style="display:block;max-width:140px;" title="{{ e.landscape or '' }}">{{ e.landscape or '—' }}</span></td>
+
+        <!-- Configuration Item -->
+        <td><span class="cell-truncate" style="display:block;max-width:160px;" title="{{ e.configuration_item or '' }}">{{ e.configuration_item or '—' }}</span></td>
+
+        <!-- Value -->
+        <td><span class="cell-truncate cell-mono" style="display:block;max-width:130px;" title="{{ e.value or '' }}">{{ e.value or '—' }}</span></td>
+
+        <!-- Rule -->
+        <td><span class="cell-dim">{{ e.rule or '—' }}</span></td>
+
+        <!-- Valid since -->
+        <td><span class="cell-dim" style="white-space:nowrap;">{{ e.valid_since_utc or '—' }}</span></td>
+
+        <!-- Upload timestamp -->
+        <td><span class="cell-dim" style="white-space:nowrap;">{{ e.upload_timestamp or '—' }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% else %}
+<div class="alert alert-empty">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/>
+    <line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/>
+  </svg>
+  <strong>
+    {% if filter_client or filter_sid or filter_reference %}
+      Aucun résultat pour ces filtres
+    {% else %}
+      Aucune donnée disponible
+    {% endif %}
+  </strong>
+  {% if not filter_client and not filter_sid and not filter_reference %}
+  Importez d'abord un fichier SAP Advisory et un fichier FRun.
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll('.status-select').forEach(function(sel) {
+  sel.addEventListener('change', async function() {
+    const id = this.dataset.id;
+    try {
+      const resp = await fetch('/entries/' + id + '/status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: this.value })
+      });
+      if (resp.ok) {
+        const el = document.getElementById('ok-' + id);
+        el.classList.add('show');
+        setTimeout(function() { el.classList.remove('show'); }, 2000);
+      }
+    } catch(e) { console.error(e); }
+  });
+});
+</script>
+{% endblock %}
