@@ -1,15 +1,15 @@
 #!/bin/bash
 # ==============================================================
-# WComply — Script de mise à jour (Docker)
-# Usage : bash /opt/wcomply/update.sh
+# VulnTrack — Script de mise à jour (Docker)
+# Usage : bash /opt/vulntrack/update.sh
 # ==============================================================
 set -e
 
-APP_DIR="/opt/wcomply"
+APP_DIR="/opt/vulntrack"
 
 echo ""
 echo "╔══════════════════════════════════════╗"
-echo "║   WComply — Mise à jour (Docker)     ║"
+echo "║   VulnTrack — Mise à jour (Docker)   ║"
 echo "╚══════════════════════════════════════╝"
 
 # ── 1. Récupérer le code ───────────────────────────────────────

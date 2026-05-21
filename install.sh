@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================
-# WComply — Script d'installation (première fois sur la VM EC2)
+# VulnTrack — Script d'installation (première fois sur la VM EC2)
 # Usage : sudo bash install.sh
 # ==============================================================
 set -e
@@ -9,8 +9,8 @@ set -e
 REPO_URL="https://github.com/TON_USERNAME/wcomply.git"
 # ───────────────────────────────────────────────────────────────
 
-APP_DIR="/opt/wcomply"
-SERVICE_NAME="wcomply"
+APP_DIR="/opt/vulntrack"
+SERVICE_NAME="vulntrack"
 PORT=8000
 
 # Détecter l'utilisateur qui a lancé sudo (pour le service systemd)
@@ -22,7 +22,7 @@ fi
 
 echo ""
 echo "╔══════════════════════════════════════╗"
-echo "║   WComply — Installation EC2         ║"
+echo "║   VulnTrack — Installation EC2       ║"
 echo "╚══════════════════════════════════════╝"
 echo "  Répertoire : $APP_DIR"
 echo "  Utilisateur : $APP_USER"
@@ -74,7 +74,7 @@ echo "▶ 4/5 Configuration du service systemd..."
 
 cat > /etc/systemd/system/${SERVICE_NAME}.service << EOF
 [Unit]
-Description=WComply — SAP Vulnerability Tracker
+Description=VulnTrack — SAP Vulnerability Tracker
 After=network.target
 
 [Service]

@@ -1,4 +1,4 @@
-# Déploiement WComply sur EC2
+# Déploiement VulnTrack sur EC2
 
 ## Prérequis
 
@@ -56,17 +56,17 @@ sudo bash install.sh
 
 L'installation :
 - Installe Python3, pip, git
-- Clone le repo dans `/opt/wcomply`
+- Clone le repo dans `/opt/vulntrack`
 - Crée le virtualenv et installe les dépendances
-- Configure et démarre le service systemd `wcomply`
+- Configure et démarre le service systemd `vulntrack`
 - L'app redémarre automatiquement si la VM reboot
 
 ### 2d. Vérifier que ça tourne
 
 ```bash
-systemctl status wcomply          # état du service
-journalctl -u wcomply -f          # logs en direct
-curl http://localhost:8000        # test local
+systemctl status vulntrack         # état du service
+journalctl -u vulntrack -f         # logs en direct
+curl http://localhost:8000         # test local
 ```
 
 L'app est accessible sur : `http://VOTRE_IP_EC2:8000`
@@ -88,13 +88,13 @@ git push
 
 ```bash
 ssh -i votre-cle.pem ubuntu@VOTRE_IP_EC2
-bash /opt/wcomply/update.sh
+bash /opt/vulntrack/update.sh
 ```
 
 Le script `update.sh` fait en une commande :
 1. `git pull` — récupère le nouveau code
-2. `pip install -r requirements.txt` — met à jour les dépendances si besoin
-3. `systemctl restart wcomply` — redémarre le service
+2. `docker compose build app` — reconstruit l'image si besoin
+3. `docker compose up -d` — redémarre les conteneurs
 
 ---
 
@@ -102,32 +102,31 @@ Le script `update.sh` fait en une commande :
 
 ```bash
 # Voir l'état du service
-systemctl status wcomply
+systemctl status vulntrack
 
 # Logs en direct
-journalctl -u wcomply -f
+journalctl -u vulntrack -f
 
 # Arrêter / démarrer / redémarrer
-sudo systemctl stop wcomply
-sudo systemctl start wcomply
-sudo systemctl restart wcomply
+sudo systemctl stop vulntrack
+sudo systemctl start vulntrack
+sudo systemctl restart vulntrack
 
 # Localisation des fichiers
-/opt/wcomply/          # code de l'app
-/opt/wcomply/venv/     # virtualenv
-/opt/wcomply/wcomply.db  # base SQLite (ne jamais supprimer !)
+/opt/vulntrack/          # code de l'app
+/opt/vulntrack/venv/     # virtualenv (mode sans Docker)
 
 # Voir le service systemd
-cat /etc/systemd/system/wcomply.service
+cat /etc/systemd/system/vulntrack.service
 ```
 
 ---
 
 ## Notes importantes
 
-**Base de données** — `wcomply.db` est exclu de Git (`.gitignore`).
-Elle est créée automatiquement au premier démarrage de l'app sur la VM
-et persiste entre les mises à jour. Ne jamais la supprimer.
+**Base de données** — MongoDB tourne dans un conteneur Docker avec un volume
+persistant (`mongo_data`). Les données survivent aux redémarrages et mises à jour.
+Ne jamais exécuter `docker compose down -v` (supprime les volumes).
 
 **Port** — L'app écoute sur le port 8000. Pour un usage en production,
 il est recommandé de mettre Nginx en reverse proxy sur le port 80/443 :
@@ -150,7 +149,7 @@ par SSH dans `install.sh` et configurez une clé SSH sur la VM :
 
 ```bash
 # Sur la VM, générer une clé SSH
-ssh-keygen -t ed25519 -C "ec2-wcomply"
+ssh-keygen -t ed25519 -C "ec2-vulntrack"
 cat ~/.ssh/id_ed25519.pub
 # Ajouter cette clé dans GitHub → Settings → SSH Keys
 
