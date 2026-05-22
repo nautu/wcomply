@@ -1,7 +1,7 @@
 import io
 import os
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import openpyxl
@@ -73,9 +73,20 @@ def calculate_priority(score) -> Optional[str]:
 def format_advisory_release(val) -> Optional[str]:
     if val is None:
         return None
-    if isinstance(val, datetime):
+    if isinstance(val, (datetime, date)):
         return val.strftime("%Y-%m")
-    return str(val)
+    # Excel serial date (days since 1899-12-30, accounts for the 1900 leap-year bug)
+    if isinstance(val, (int, float)) and val > 1:
+        try:
+            d = date(1899, 12, 30) + timedelta(days=int(val))
+            if d.year >= 2000:
+                return d.strftime("%Y-%m")
+        except Exception:
+            pass
+    s = str(val).strip()
+    if re.match(r"\d{4}-\d{2}", s):
+        return s[:7]
+    return None
 
 
 def apply_dedup(db):
@@ -253,55 +264,104 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
     doc = db.sap_notes.find_one({}, sort=[("advisory_release", DESCENDING)])
     max_release = doc["advisory_release"] if doc else None
 
+    # ── Détection du format à partir de la ligne d'en-têtes ──────
+    headers = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
+    if "Nombre" in headers:
+        fmt = "fr"                              # nouveau format SAP for Me (français)
+        col = {h: i for i, h in enumerate(headers)}
+    elif "Reference Note" in headers:
+        fmt = "en"                              # ancien format anglais (positions fixes)
+        col = None
+    else:
+        return RedirectResponse(
+            "/advisory?msg=Format+non+reconnu+(colonne+'Nombre'+ou+'Reference+Note'+attendue)",
+            status_code=303,
+        )
+
+    def _s(v):
+        return str(v).strip() if v is not None else None
+
+    def _get(row, name):
+        idx = col.get(name) if col else None
+        return row[idx] if idx is not None and idx < len(row) else None
+
+    def _cvss(raw):
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            try:
+                return float(raw.replace(",", "."))
+            except Exception:
+                return None
+        try:
+            return float(raw)
+        except Exception:
+            return None
+
     new_rows: dict[int, dict] = {}
     skipped = 0
 
     for row in ws.iter_rows(min_row=2, values_only=True):
-        advisory_release = format_advisory_release(row[0])
+        # ── Date de release ──────────────────────────────────────
+        if fmt == "en":
+            advisory_release = format_advisory_release(row[0])
+        else:
+            advisory_release = format_advisory_release(_get(row, "Date/Heure de validation"))
+
         if not advisory_release:
             continue
         if max_release and advisory_release <= max_release:
             skipped += 1
             continue
 
-        reference_note = row[2]
-        if reference_note is None:
+        # ── Reference Note ───────────────────────────────────────
+        raw_ref = row[2] if fmt == "en" else _get(row, "Nombre")
+        if raw_ref is None:
             continue
         try:
-            reference_note = int(reference_note)
+            reference_note = int(raw_ref)
         except (ValueError, TypeError):
             continue
 
-        try:
-            version = int(row[3]) if row[3] is not None else 0
-        except (ValueError, TypeError):
-            version = 0
+        # ── Construction du document selon le format ─────────────
+        if fmt == "en":
+            try:
+                version = int(row[3]) if row[3] is not None else 0
+            except (ValueError, TypeError):
+                version = 0
 
-        cvss = row[11]
-        if isinstance(cvss, str):
-            try: cvss = float(cvss)
-            except Exception: cvss = None
-        elif cvss is not None:
-            cvss = float(cvss)
-
-        def _s(v): return str(v).strip() if v is not None else None
-
-        data = {
-            "advisory_release": advisory_release,
-            "sap_component":    _s(row[1]),
-            "reference_note":   reference_note,
-            "version":          version,
-            "title":            _s(row[4]),
-            "category":         _s(row[5]),
-            "priority_sap":     _s(row[6]),
-            "cvss_v3_base_score": cvss,
-            "correction_type":                 _s(row[34]),
-            "recommended_implementation_process": _s(row[35]),
-            "downtime_required": _s(row[36]),
-        }
-
-        if reference_note not in new_rows or version > new_rows[reference_note]["version"]:
-            new_rows[reference_note] = data
+            data = {
+                "advisory_release":    advisory_release,
+                "sap_component":       _s(row[1]),
+                "reference_note":      reference_note,
+                "version":             version,
+                "title":               _s(row[4]),
+                "category":            _s(row[5]),
+                "priority_sap":        _s(row[6]),
+                "cvss_v3_base_score":  _cvss(row[11]),
+                "correction_type":     _s(row[34]),
+                "recommended_implementation_process": _s(row[35]),
+                "downtime_required":   _s(row[36]),
+            }
+            if reference_note not in new_rows or version > new_rows[reference_note]["version"]:
+                new_rows[reference_note] = data
+        else:
+            categorie = _s(_get(row, "Catégorie"))
+            data = {
+                "advisory_release":    advisory_release,
+                "sap_component":       _s(_get(row, "Composant SAP")),
+                "reference_note":      reference_note,
+                "version":             0,
+                "title":               _s(_get(row, "Titre")),
+                "category":            categorie,
+                "priority_sap":        _s(_get(row, "Priorité")),
+                "cvss_v3_base_score":  _cvss(_get(row, "Score CVSS")),
+                "correction_type":     categorie,
+                "recommended_implementation_process": None,
+                "downtime_required":   None,
+            }
+            if reference_note not in new_rows:
+                new_rows[reference_note] = data
 
     added = updated = 0
     for ref, data in new_rows.items():
@@ -315,7 +375,8 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
             added += 1
 
     apply_dedup(db)
-    msg = f"{added} notes ajoutées, {updated} mises à jour, {skipped} ignorées"
+    fmt_label = "SAP for Me" if fmt == "fr" else "anglais"
+    msg = f"{added} notes ajoutées, {updated} mises à jour, {skipped} ignorées (format {fmt_label})"
     return RedirectResponse(f"/advisory?msg={msg}", status_code=303)
 
 
