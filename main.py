@@ -28,7 +28,7 @@ TOKEN_HOURS   = 8
 _mongo = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
 _db    = _mongo[MONGO_DB_NAME]
 
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__truncate_error=False)
 
 
 def get_db():
@@ -63,7 +63,7 @@ def _decode_token(token: str) -> dict:
 
 def _init_admin():
     if _db.users.count_documents({}) == 0:
-        pw = "VulnTrack2026!"
+        pw = "Admin2026"
         _db.users.insert_one({
             "username":      "admin",
             "password_hash": _hash_pw(pw),
