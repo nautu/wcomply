@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VulnTrack — Connexion</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="/static/style.css" rel="stylesheet">
+  <script>
+    (function(){
+      var t = localStorage.getItem('vt-theme');
+      if (t === 'light') document.documentElement.classList.add('light');
+    })();
+  </script>
+</head>
+<body class="login-body">
+
+<div class="login-page">
+  <div class="login-box">
+
+    <!-- Brand -->
+    <div class="login-brand">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+           style="color:var(--accent); filter:drop-shadow(0 0 8px var(--accent-glow));">
+        <path d="M12 2 3 7v5c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7z"/>
+        <polyline points="9 12 11 14 15 10"/>
+      </svg>
+      <span>VulnTrack</span>
+    </div>
+
+    <h1 class="login-title">Connexion</h1>
+    <p class="login-sub">Entrez vos identifiants pour accéder à la plateforme.</p>
+
+    {% if error %}
+    <div class="login-error">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="12" y1="8" x2="12" y2="12"/>
+        <line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      {{ error }}
+    </div>
+    {% endif %}
+
+    <form method="post" action="/login" class="login-form">
+      <div class="login-field">
+        <label class="form-label" for="username">Nom d'utilisateur</label>
+        <input type="text" id="username" name="username" class="form-control login-input"
+               autocomplete="username" required autofocus placeholder="admin">
+      </div>
+
+      <div class="login-field">
+        <label class="form-label" for="password">Mot de passe</label>
+        <input type="password" id="password" name="password" class="form-control login-input"
+               autocomplete="current-password" required placeholder="••••••••">
+      </div>
+
+      <button type="submit" class="btn btn-primary login-submit">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/>
+          <polyline points="10 17 15 12 10 7"/>
+          <line x1="15" y1="12" x2="3" y2="12"/>
+        </svg>
+        Se connecter
+      </button>
+    </form>
+
+  </div>
+</div>
+
+</body>
+</html>

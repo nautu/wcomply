@@ -1,7 +1,7 @@
 import io
 import os
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 import openpyxl
@@ -11,16 +11,24 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 from pymongo import ASCENDING, DESCENDING, MongoClient
+from starlette.middleware.base import BaseHTTPMiddleware
 
 load_dotenv()
 
-# ── MongoDB ───────────────────────────────────────────────────
-MONGO_URL    = os.getenv("MONGO_URL", "mongodb://localhost:27017")
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "wcomply")
+# ── Config ────────────────────────────────────────────────────
+MONGO_URL     = os.getenv("MONGO_URL", "mongodb://localhost:27017")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "vulntrack")
+SECRET_KEY    = os.getenv("SECRET_KEY", "change_me_in_production")
+ALGORITHM     = "HS256"
+TOKEN_HOURS   = 8
 
 _mongo = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
 _db    = _mongo[MONGO_DB_NAME]
+
+pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def get_db():
@@ -28,10 +36,75 @@ def get_db():
 
 
 # ── App ───────────────────────────────────────────────────────
-app = FastAPI(title="WComply")
+app = FastAPI(title="VulnTrack")
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+
+# ── Auth utilities ────────────────────────────────────────────
+
+def _hash_pw(pw: str) -> str:
+    return pwd_ctx.hash(pw)
+
+
+def _verify_pw(pw: str, hashed: str) -> bool:
+    return pwd_ctx.verify(pw, hashed)
+
+
+def _create_token(username: str, role: str) -> str:
+    exp = datetime.now(timezone.utc) + timedelta(hours=TOKEN_HOURS)
+    return jwt.encode({"sub": username, "role": role, "exp": exp},
+                      SECRET_KEY, algorithm=ALGORITHM)
+
+
+def _decode_token(token: str) -> dict:
+    return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+
+
+def _init_admin():
+    if _db.users.count_documents({}) == 0:
+        pw = "VulnTrack2026!"
+        _db.users.insert_one({
+            "username":      "admin",
+            "password_hash": _hash_pw(pw),
+            "role":          "admin",
+            "created_at":    datetime.now().strftime("%Y-%m-%d %H:%M"),
+        })
+        print("")
+        print("[VulnTrack] ★  Premier démarrage — compte admin créé")
+        print("[VulnTrack]    username : admin")
+        print(f"[VulnTrack]    password : {pw}")
+        print("[VulnTrack]    → Changez ce mot de passe via /admin dès que possible.")
+        print("")
+
+
+# ── Auth Middleware ───────────────────────────────────────────
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if path == "/login" or path.startswith("/static/"):
+            return await call_next(request)
+
+        token = request.cookies.get("vt_token")
+        if not token:
+            return RedirectResponse("/login", status_code=302)
+
+        try:
+            payload = _decode_token(token)
+            request.state.user = payload
+        except JWTError:
+            resp = RedirectResponse("/login", status_code=302)
+            resp.delete_cookie("vt_token")
+            return resp
+
+        return await call_next(request)
+
+
+app.add_middleware(AuthMiddleware)
+
+
+# ── Startup ───────────────────────────────────────────────────
 
 @app.on_event("startup")
 def create_indexes():
@@ -40,8 +113,11 @@ def create_indexes():
         _db.sap_notes.create_index([("advisory_release", ASCENDING)])
         _db.frun_data.create_index([("client",    ASCENDING)])
         _db.frun_data.create_index([("check_ref", ASCENDING)])
+        _db.users.create_index([("username", ASCENDING)], unique=True)
+        _init_admin()
     except Exception as e:
         print(f"[startup] MongoDB non disponible ({e}). Les index seront créés à la première connexion.")
+
 
 STATUS_VALUES = [
     "Not Started", "Started", "Implemented",
@@ -49,7 +125,27 @@ STATUS_VALUES = [
 ]
 
 
-# ── Utilitaires ───────────────────────────────────────────────
+# ── Route helper & dependencies ───────────────────────────────
+
+def tpl(request: Request, name: str, ctx: Optional[dict] = None):
+    user = getattr(request.state, "user", {})
+    data: dict = {"current_user": user}
+    if ctx:
+        data.update(ctx)
+    return templates.TemplateResponse(request, name, data)
+
+
+def get_current_user(request: Request) -> dict:
+    return getattr(request.state, "user", {})
+
+
+def require_admin(user: dict = Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Accès réservé aux administrateurs")
+    return user
+
+
+# ── Business logic utilities ──────────────────────────────────
 
 def clean_check_ref(value) -> Optional[int]:
     if value is None:
@@ -99,7 +195,6 @@ def strip_cvss_prefix(s: Optional[str]) -> Optional[str]:
 
 
 def apply_dedup(db):
-    """Pour chaque reference_note, ne garder que la version la plus haute."""
     pipeline = [
         {"$sort": {"version": DESCENDING}},
         {"$group": {
@@ -133,7 +228,6 @@ def build_merged_entries(db, client=None, sid=None, reference=None) -> list:
     if not frun_list:
         return []
 
-    # Charger les notes Advisory correspondantes en une seule requête
     check_refs = list({e["check_ref"] for e in frun_list if e.get("check_ref")})
     advisory_map: dict = {}
     if check_refs:
@@ -152,13 +246,13 @@ def build_merged_entries(db, client=None, sid=None, reference=None) -> list:
             "status":         frun.get("status", "Not Started"),
             "comment":        frun.get("comment", ""),
             "status_history": frun.get("status_history", []),
-            "check_description":               strip_cvss_prefix(frun.get("check_description")),
-            "policy":                          frun.get("policy"),
-            "correction_type":                 adv.get("correction_type")                 if adv else None,
-            "reference":                       adv.get("reference_note")                  if adv else frun.get("check_ref"),
-            "type":                            adv.get("category")                        if adv else None,
+            "check_description":                  strip_cvss_prefix(frun.get("check_description")),
+            "policy":                             frun.get("policy"),
+            "correction_type":                    adv.get("correction_type")                    if adv else None,
+            "reference":                          adv.get("reference_note")                     if adv else frun.get("check_ref"),
+            "type":                               adv.get("category")                           if adv else None,
             "recommended_implementation_process": adv.get("recommended_implementation_process") if adv else None,
-            "downtime_required":               adv.get("downtime_required")               if adv else None,
+            "downtime_required":                  adv.get("downtime_required")                  if adv else None,
             "landscape":          frun.get("landscape"),
             "configuration_item": frun.get("configuration_item"),
             "value":              frun.get("value"),
@@ -229,6 +323,113 @@ def _client_summary(entries: list, client: str) -> dict:
     }
 
 
+# ── Routes : Authentification ─────────────────────────────────
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request, error: str = ""):
+    token = request.cookies.get("vt_token")
+    if token:
+        try:
+            _decode_token(token)
+            return RedirectResponse("/", status_code=302)
+        except JWTError:
+            pass
+    return templates.TemplateResponse(request, "login.html",
+                                      {"error": error, "current_user": {}})
+
+
+@app.post("/login")
+async def login(request: Request, db=Depends(get_db)):
+    form     = await request.form()
+    username = str(form.get("username", "")).strip()
+    password = str(form.get("password", ""))
+
+    user_doc = db.users.find_one({"username": username})
+    if not user_doc or not _verify_pw(password, user_doc["password_hash"]):
+        return templates.TemplateResponse(request, "login.html", {
+            "error": "Identifiants incorrects",
+            "current_user": {},
+        }, status_code=401)
+
+    token = _create_token(user_doc["username"], user_doc["role"])
+    resp  = RedirectResponse("/", status_code=303)
+    resp.set_cookie("vt_token", token, httponly=True, samesite="lax",
+                    max_age=TOKEN_HOURS * 3600)
+    return resp
+
+
+@app.post("/logout")
+def logout():
+    resp = RedirectResponse("/login", status_code=303)
+    resp.delete_cookie("vt_token")
+    return resp
+
+
+# ── Routes : Admin ────────────────────────────────────────────
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_page(request: Request, msg: str = "", db=Depends(get_db),
+               _: dict = Depends(require_admin)):
+    users = list(db.users.find({}, {"password_hash": 0})
+                 .sort("username", ASCENDING))
+    return tpl(request, "admin.html", {"users": users, "msg": msg})
+
+
+@app.post("/admin/users")
+async def create_user(request: Request, db=Depends(get_db),
+                      _: dict = Depends(require_admin)):
+    form     = await request.form()
+    username = str(form.get("username", "")).strip().lower()
+    password = str(form.get("password", ""))
+    role     = str(form.get("role", "consultant"))
+
+    if not username or not password:
+        return RedirectResponse("/admin?msg=Username+et+mot+de+passe+requis",
+                                status_code=303)
+    if role not in ("admin", "consultant"):
+        role = "consultant"
+    if db.users.find_one({"username": username}):
+        return RedirectResponse(f"/admin?msg=L'utilisateur+'{username}'+existe+déjà",
+                                status_code=303)
+
+    db.users.insert_one({
+        "username":      username,
+        "password_hash": _hash_pw(password),
+        "role":          role,
+        "created_at":    datetime.now().strftime("%Y-%m-%d %H:%M"),
+    })
+    return RedirectResponse(f"/admin?msg=Compte+'{username}'+créé+avec+succès",
+                            status_code=303)
+
+
+@app.post("/admin/users/{username}/delete")
+def delete_user(username: str, db=Depends(get_db),
+                admin: dict = Depends(require_admin)):
+    if username == admin.get("sub"):
+        return RedirectResponse(
+            "/admin?msg=Impossible+de+supprimer+votre+propre+compte",
+            status_code=303)
+    db.users.delete_one({"username": username})
+    return RedirectResponse(f"/admin?msg=Compte+'{username}'+supprimé",
+                            status_code=303)
+
+
+# ── Routes : Paramètres ───────────────────────────────────────
+
+@app.post("/settings/reset-db")
+def reset_db(db=Depends(get_db), _: dict = Depends(require_admin)):
+    db.sap_notes.drop()
+    db.frun_data.drop()
+    try:
+        db.sap_notes.create_index([("reference_note",   ASCENDING)])
+        db.sap_notes.create_index([("advisory_release", ASCENDING)])
+        db.frun_data.create_index([("client",    ASCENDING)])
+        db.frun_data.create_index([("check_ref", ASCENDING)])
+    except Exception:
+        pass
+    return RedirectResponse("/", status_code=303)
+
+
 # ── Routes : Dashboard ────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -257,7 +458,7 @@ def index(request: Request, db=Depends(get_db)):
             client_p1[e["client"]] = client_p1.get(e["client"], 0) + 1
     top_client = max(client_p1.items(), key=lambda x: x[1]) if client_p1 else None
 
-    return templates.TemplateResponse(request, "index.html", {
+    return tpl(request, "index.html", {
         "advisory_count":  advisory_count,
         "frun_count":      frun_count,
         "clients":         len(clients_list),
@@ -274,22 +475,6 @@ def index(request: Request, db=Depends(get_db)):
     })
 
 
-# ── Routes : Paramètres ───────────────────────────────────
-
-@app.post("/settings/reset-db")
-def reset_db(db=Depends(get_db)):
-    db.sap_notes.drop()
-    db.frun_data.drop()
-    try:
-        db.sap_notes.create_index([("reference_note",   ASCENDING)])
-        db.sap_notes.create_index([("advisory_release", ASCENDING)])
-        db.frun_data.create_index([("client",    ASCENDING)])
-        db.frun_data.create_index([("check_ref", ASCENDING)])
-    except Exception:
-        pass
-    return RedirectResponse("/", status_code=303)
-
-
 # ── Routes : Advisory ─────────────────────────────────────────
 
 @app.get("/advisory", response_class=HTMLResponse)
@@ -297,7 +482,7 @@ def advisory_page(request: Request, msg: str = "", db=Depends(get_db)):
     count = db.sap_notes.count_documents({})
     doc   = db.sap_notes.find_one({}, sort=[("advisory_release", DESCENDING)])
     mr    = doc["advisory_release"] if doc else "—"
-    return templates.TemplateResponse(request, "advisory.html", {
+    return tpl(request, "advisory.html", {
         "count":        count,
         "max_release":  mr,
         "next_release": _next_release(mr if mr != "—" else None),
@@ -317,13 +502,13 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
     doc = db.sap_notes.find_one({}, sort=[("advisory_release", DESCENDING)])
     max_release = doc["advisory_release"] if doc else None
 
-    # ── Détection du format à partir de la ligne d'en-têtes ──────
+    # Détection du format à partir de la ligne d'en-têtes
     headers = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
     if "Nombre" in headers:
-        fmt = "fr"                              # nouveau format SAP for Me (français)
+        fmt = "fr"
         col = {h: i for i, h in enumerate(headers)}
     elif "Reference Note" in headers:
-        fmt = "en"                              # ancien format anglais (positions fixes)
+        fmt = "en"
         col = None
     else:
         return RedirectResponse(
@@ -355,7 +540,6 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
     skipped = 0
 
     for row in ws.iter_rows(min_row=2, values_only=True):
-        # ── Date de release ──────────────────────────────────────
         if fmt == "en":
             advisory_release = format_advisory_release(row[0])
         else:
@@ -367,7 +551,6 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
             skipped += 1
             continue
 
-        # ── Reference Note ───────────────────────────────────────
         raw_ref = row[2] if fmt == "en" else _get(row, "Nombre")
         if raw_ref is None:
             continue
@@ -376,7 +559,6 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
         except (ValueError, TypeError):
             continue
 
-        # ── Construction du document selon le format ─────────────
         if fmt == "en":
             try:
                 version = int(row[3]) if row[3] is not None else 0
@@ -439,7 +621,7 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
 def frun_page(request: Request, msg: str = "", db=Depends(get_db)):
     count   = db.frun_data.count_documents({})
     clients = db.frun_data.distinct("client")
-    return templates.TemplateResponse(request, "frun.html", {
+    return tpl(request, "frun.html", {
         "count":   count,
         "clients": sorted(clients),
         "msg":     msg,
@@ -498,7 +680,7 @@ def merged_view(
 ):
     entries = build_merged_entries(db, client or None, sid or None, reference or None)
     clients = sorted(db.frun_data.distinct("client"))
-    return templates.TemplateResponse(request, "merged.html", {
+    return tpl(request, "merged.html", {
         "entries":          entries,
         "status_values":    STATUS_VALUES,
         "filter_client":    client,
@@ -514,8 +696,7 @@ def export_merged(
     client: str = "", sid: str = "", reference: str = "",
     db=Depends(get_db),
 ):
-    """Exporte la vue filtrée en .xlsx avec mise en forme complète."""
-    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.styles import Alignment, Font, PatternFill
 
     entries = build_merged_entries(db, client or None, sid or None, reference or None)
 
@@ -523,28 +704,26 @@ def export_merged(
     ws = wb.active
     ws.title = "VulnTrack"
 
-    # ── Colonnes dans l'ordre du cahier des charges ────────────
     COLUMNS = [
-        ("Client",                  lambda e: e.get("client")),
-        ("SID",                     lambda e: e.get("sid")),
-        ("Priority",                lambda e: e.get("priority")),
-        ("Statut",                  lambda e: e.get("status")),
-        ("Reference Note",          lambda e: e.get("reference")),
-        ("Check Description",       lambda e: e.get("check_description")),
-        ("Policy",                  lambda e: e.get("policy")),
-        ("Correction Type",         lambda e: e.get("correction_type")),
-        ("Recommended Process",     lambda e: e.get("recommended_implementation_process")),
-        ("Downtime Required",       lambda e: e.get("downtime_required")),
-        ("Landscape",               lambda e: e.get("landscape")),
-        ("Configuration Item",      lambda e: e.get("configuration_item")),
-        ("Value",                   lambda e: e.get("value")),
-        ("Rule",                    lambda e: e.get("rule")),
-        ("Valid Since",             lambda e: e.get("valid_since_utc")),
-        ("Commentaire",             lambda e: e.get("comment", "")),
+        ("Client",              lambda e: e.get("client")),
+        ("SID",                 lambda e: e.get("sid")),
+        ("Priority",            lambda e: e.get("priority")),
+        ("Statut",              lambda e: e.get("status")),
+        ("Reference Note",      lambda e: e.get("reference")),
+        ("Check Description",   lambda e: e.get("check_description")),
+        ("Policy",              lambda e: e.get("policy")),
+        ("Correction Type",     lambda e: e.get("correction_type")),
+        ("Recommended Process", lambda e: e.get("recommended_implementation_process")),
+        ("Downtime Required",   lambda e: e.get("downtime_required")),
+        ("Landscape",           lambda e: e.get("landscape")),
+        ("Configuration Item",  lambda e: e.get("configuration_item")),
+        ("Value",               lambda e: e.get("value")),
+        ("Rule",                lambda e: e.get("rule")),
+        ("Valid Since",         lambda e: e.get("valid_since_utc")),
+        ("Commentaire",         lambda e: e.get("comment", "")),
     ]
-    PRIORITY_COL_IDX = 3   # colonne "Priority" = colonne C (1-based)
+    PRIORITY_COL_IDX = 3
 
-    # ── En-têtes ───────────────────────────────────────────────
     ws.append([col[0] for col in COLUMNS])
 
     header_fill = PatternFill("solid", fgColor="FF1E2338")
@@ -554,15 +733,13 @@ def export_merged(
         cell.alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 18
 
-    # ── Données ────────────────────────────────────────────────
     for e in entries:
         ws.append([fn(e) for _, fn in COLUMNS])
 
-    # ── Couleurs P1 / P2 / P3 sur la colonne Priority ─────────
     PRIO_FILL = {
-        "P1": PatternFill("solid", fgColor="FFC0392B"),   # rouge opaque
-        "P2": PatternFill("solid", fgColor="FFD35400"),   # orange opaque
-        "P3": PatternFill("solid", fgColor="FF27AE60"),   # vert opaque
+        "P1": PatternFill("solid", fgColor="FFC0392B"),
+        "P2": PatternFill("solid", fgColor="FFD35400"),
+        "P3": PatternFill("solid", fgColor="FF27AE60"),
     }
     PRIO_FONT = Font(bold=True, color="FFFFFF")
 
@@ -573,7 +750,6 @@ def export_merged(
             prio_cell.fill = fill
             prio_cell.font = PRIO_FONT
 
-    # ── Largeur colonnes auto-ajustée ──────────────────────────
     for col in ws.columns:
         max_len = max(
             (len(str(cell.value)) for cell in col if cell.value is not None),
@@ -581,7 +757,6 @@ def export_merged(
         )
         ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 60)
 
-    # ── Figer la première ligne ────────────────────────────────
     ws.freeze_panes = "A2"
 
     buf = io.BytesIO()
@@ -674,7 +849,8 @@ def view(request: Request, client: str = "", db=Depends(get_db)):
     g_done  = sum(1 for e in all_entries if e["status"] in ("Validated", "Implemented"))
     g_ns    = sum(1 for e in all_entries if e["status"] == "Not Started")
 
-    pipeline_order = ["Not Started","Started","Implemented","Validated","To be checked","Exception"]
+    pipeline_order = ["Not Started", "Started", "Implemented",
+                      "Validated", "To be checked", "Exception"]
     g_by_status: dict[str, int] = {}
     for e in all_entries:
         g_by_status[e["status"]] = g_by_status.get(e["status"], 0) + 1
@@ -693,7 +869,7 @@ def view(request: Request, client: str = "", db=Depends(get_db)):
         selected_entries = build_merged_entries(db, client=client)
         selected_summary = next((s for s in summary if s["client"] == client), None)
 
-    return templates.TemplateResponse(request, "view.html", {
+    return tpl(request, "view.html", {
         "summary":          summary,
         "global_stats":     global_stats,
         "selected_client":  client,

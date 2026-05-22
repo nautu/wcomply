@@ -17,19 +17,20 @@ echo "▶ 1/3 git pull..."
 git -C "$APP_DIR" pull
 echo "  ✓ Code à jour"
 
-# ── 2. Reconstruire et redémarrer les conteneurs ───────────────
+# ── 2. Tirer les images distantes (optionnel) ─────────────────
 echo ""
-echo "▶ 2/3 Rebuild de l'image app..."
-docker compose -f "$APP_DIR/docker-compose.yml" build app
-echo "  ✓ Image reconstruite"
+echo "▶ 2/3 docker-compose pull..."
+docker compose -f "$APP_DIR/docker-compose.yml" pull --ignore-buildable 2>/dev/null || true
+echo "  ✓ Images à jour"
 
+# ── 3. Rebuild et redémarrage ─────────────────────────────────
 echo ""
-echo "▶ 3/3 Redémarrage des services..."
-docker compose -f "$APP_DIR/docker-compose.yml" up -d
-sleep 3
+echo "▶ 3/3 docker-compose up -d --build..."
+docker compose -f "$APP_DIR/docker-compose.yml" up -d --build
+sleep 4
 
 # Vérification
-if docker compose -f "$APP_DIR/docker-compose.yml" ps | grep -q "running"; then
+if docker compose -f "$APP_DIR/docker-compose.yml" ps | grep -q "running\|Up"; then
     echo "  ✓ Services actifs"
 else
     echo "  ✗ Problème détecté — vérifiez :"
