@@ -94,8 +94,6 @@
         <th class="col-desc">Check Description</th>
         <th class="col-text">Policy</th>
         <th class="col-text">Correction Type</th>
-        <th style="min-width:180px;">Process recommandé</th>
-        <th class="col-short">Downtime</th>
         <th class="col-text">Landscape</th>
         <th style="min-width:160px;">Configuration Item</th>
         <th class="col-text">Value</th>
@@ -158,12 +156,6 @@
         <td><span class="cell-truncate" style="display:block;max-width:230px;" title="{{ e.check_description or '' }}">{{ e.check_description or '—' }}</span></td>
         <td><span class="cell-truncate" style="display:block;max-width:140px;">{{ e.policy or '—' }}</span></td>
         <td><span class="cell-truncate" style="display:block;max-width:150px;" title="{{ e.correction_type or '' }}">{{ e.correction_type or '—' }}</span></td>
-        <td><span class="cell-truncate" style="display:block;max-width:200px;" title="{{ e.recommended_implementation_process or '' }}">{{ e.recommended_implementation_process or '—' }}</span></td>
-        <td>
-          {% if e.downtime_required == 'Yes' %}<span class="badge badge-yes">Oui</span>
-          {% elif e.downtime_required == 'No' %}<span class="badge badge-no">Non</span>
-          {% else %}<span class="cell-dim">{{ e.downtime_required or '—' }}</span>{% endif %}
-        </td>
         <td><span class="cell-truncate" style="display:block;max-width:140px;">{{ e.landscape or '—' }}</span></td>
         <td><span class="cell-truncate" style="display:block;max-width:160px;">{{ e.configuration_item or '—' }}</span></td>
         <td><span class="cell-truncate cell-mono" style="display:block;max-width:130px;">{{ e.value or '—' }}</span></td>

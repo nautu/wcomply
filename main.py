@@ -89,6 +89,15 @@ def format_advisory_release(val) -> Optional[str]:
     return None
 
 
+_CVSS_PREFIX_RE = re.compile(r'^\[p[1-3]-cvss\s+[\d.]+\]\s*', re.IGNORECASE)
+
+
+def strip_cvss_prefix(s: Optional[str]) -> Optional[str]:
+    if not s:
+        return s
+    return _CVSS_PREFIX_RE.sub('', s).strip() or s
+
+
 def apply_dedup(db):
     """Pour chaque reference_note, ne garder que la version la plus haute."""
     pipeline = [
@@ -143,7 +152,7 @@ def build_merged_entries(db, client=None, sid=None, reference=None) -> list:
             "status":         frun.get("status", "Not Started"),
             "comment":        frun.get("comment", ""),
             "status_history": frun.get("status_history", []),
-            "check_description":               frun.get("check_description"),
+            "check_description":               strip_cvss_prefix(frun.get("check_description")),
             "policy":                          frun.get("policy"),
             "correction_type":                 adv.get("correction_type")                 if adv else None,
             "reference":                       adv.get("reference_note")                  if adv else frun.get("check_ref"),
@@ -226,15 +235,59 @@ def _client_summary(entries: list, client: str) -> dict:
 def index(request: Request, db=Depends(get_db)):
     advisory_count = db.sap_notes.count_documents({})
     frun_count     = db.frun_data.count_documents({})
-    clients        = len(db.frun_data.distinct("client"))
+    clients_list   = db.frun_data.distinct("client")
     doc = db.sap_notes.find_one({}, sort=[("advisory_release", DESCENDING)])
     max_release = doc["advisory_release"] if doc else "—"
+
+    all_entries = build_merged_entries(db) if frun_count > 0 else []
+    total = len(all_entries)
+    p1    = sum(1 for e in all_entries if e["priority"] == "P1")
+    p2    = sum(1 for e in all_entries if e["priority"] == "P2")
+    p3    = sum(1 for e in all_entries if e["priority"] == "P3")
+    done  = sum(1 for e in all_entries if e["status"] in ("Validated", "Implemented"))
+    progress_pct = round(done / total * 100) if total else 0
+
+    by_status: dict[str, int] = {}
+    for e in all_entries:
+        by_status[e["status"]] = by_status.get(e["status"], 0) + 1
+
+    client_p1: dict[str, int] = {}
+    for e in all_entries:
+        if e["priority"] == "P1" and e.get("client"):
+            client_p1[e["client"]] = client_p1.get(e["client"], 0) + 1
+    top_client = max(client_p1.items(), key=lambda x: x[1]) if client_p1 else None
+
     return templates.TemplateResponse(request, "index.html", {
-        "advisory_count": advisory_count,
-        "frun_count":     frun_count,
-        "clients":        clients,
-        "max_release":    max_release,
+        "advisory_count":  advisory_count,
+        "frun_count":      frun_count,
+        "clients":         len(clients_list),
+        "max_release":     max_release,
+        "dash_total":      total,
+        "dash_p1":         p1,
+        "dash_p2":         p2,
+        "dash_p3":         p3,
+        "dash_done":       done,
+        "dash_progress":   progress_pct,
+        "dash_by_status":  by_status,
+        "dash_top_client": top_client,
+        "status_order":    STATUS_VALUES,
     })
+
+
+# ── Routes : Paramètres ───────────────────────────────────
+
+@app.post("/settings/reset-db")
+def reset_db(db=Depends(get_db)):
+    db.sap_notes.drop()
+    db.frun_data.drop()
+    try:
+        db.sap_notes.create_index([("reference_note",   ASCENDING)])
+        db.sap_notes.create_index([("advisory_release", ASCENDING)])
+        db.frun_data.create_index([("client",    ASCENDING)])
+        db.frun_data.create_index([("check_ref", ASCENDING)])
+    except Exception:
+        pass
+    return RedirectResponse("/", status_code=303)
 
 
 # ── Routes : Advisory ─────────────────────────────────────────

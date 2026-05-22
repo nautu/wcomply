@@ -8,6 +8,12 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link href="/static/style.css" rel="stylesheet">
+  <script>
+    (function(){
+      var t = localStorage.getItem('vt-theme');
+      if (t === 'light') document.documentElement.classList.add('light');
+    })();
+  </script>
 </head>
 <body>
 
@@ -68,7 +74,116 @@
       <span>Visualisation</span>
     </a>
   </div>
+
+  <button class="nav-settings-btn" id="settingsBtn" type="button" title="Paramètres" aria-label="Paramètres">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  </button>
 </nav>
+
+<!-- ── Settings overlay ──────────────────────────────── -->
+<div class="settings-overlay" id="settingsOverlay"></div>
+
+<!-- ── Settings sidebar ─────────────────────────────── -->
+<div class="settings-sidebar" id="settingsSidebar">
+
+  <div class="settings-hd">
+    <span class="settings-title">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+      </svg>
+      Paramètres
+    </span>
+    <button class="settings-close" id="settingsClose" type="button" aria-label="Fermer">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+    </button>
+  </div>
+
+  <div class="settings-body">
+
+    <!-- Apparence -->
+    <div class="settings-group">
+      <div class="settings-group-title">Apparence</div>
+      <div class="settings-row">
+        <div>
+          <div class="settings-row-label">Mode clair</div>
+          <div class="settings-row-sub">Bascule thème clair / sombre</div>
+        </div>
+        <label class="toggle-wrap" title="Basculer le thème">
+          <input type="checkbox" id="themeToggle" class="toggle-input">
+          <span class="toggle-track"><span class="toggle-thumb"></span></span>
+        </label>
+      </div>
+    </div>
+
+    <!-- Langue -->
+    <div class="settings-group">
+      <div class="settings-group-title">Langue</div>
+      <div class="settings-row" style="flex-direction:column; align-items:stretch; gap:8px;">
+        <select class="form-control" id="langSelect" style="font-size:13px;">
+          <option value="fr">Français</option>
+          <option value="en">English (bientôt disponible)</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- À propos -->
+    <div class="settings-group">
+      <div class="settings-group-title">À propos</div>
+      <div class="settings-row" style="margin-bottom:8px;">
+        <span class="settings-row-label">Version</span>
+        <span class="settings-version-tag">v1.0.0</span>
+      </div>
+      <div class="settings-row">
+        <span class="settings-row-label">Environnement</span>
+        <span style="font-size:12px; color:var(--txt-3);">Production</span>
+      </div>
+    </div>
+
+    <!-- Zone de danger -->
+    <div class="settings-group settings-group-danger">
+      <div class="settings-group-title">Zone de danger</div>
+      <p class="settings-danger-desc">
+        Supprime toutes les notes SAP Advisory et toutes les entrées FRun.
+        Cette opération est irréversible.
+      </p>
+      <div id="resetStep1">
+        <button type="button" class="settings-btn-danger"
+                onclick="document.getElementById('resetStep1').style.display='none';
+                         document.getElementById('resetStep2').style.display='block';">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6"/>
+            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+            <path d="M10 11v6"/><path d="M14 11v6"/>
+            <path d="M9 6V4h6v2"/>
+          </svg>
+          Vider la base de données
+        </button>
+      </div>
+      <div id="resetStep2" style="display:none;">
+        <p style="font-size:12.5px; color:var(--p1); margin-bottom:10px; font-weight:600; line-height:1.45;">
+          Confirmer la suppression de toutes les données ?
+        </p>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <form action="/settings/reset-db" method="post">
+            <button type="submit" class="settings-btn-danger">Oui, tout supprimer</button>
+          </form>
+          <button type="button" class="btn btn-ghost btn-sm"
+                  onclick="document.getElementById('resetStep1').style.display='block';
+                           document.getElementById('resetStep2').style.display='none';">
+            Annuler
+          </button>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /settings-body -->
+</div><!-- /settings-sidebar -->
 
 <div class="main-content">
   <div class="page">
@@ -77,5 +192,50 @@
 </div>
 
 {% block scripts %}{% endblock %}
+
+<script>
+// ── Settings sidebar ─────────────────────────────────────
+const settingsBtn     = document.getElementById('settingsBtn');
+const settingsClose   = document.getElementById('settingsClose');
+const settingsSidebar = document.getElementById('settingsSidebar');
+const settingsOverlay = document.getElementById('settingsOverlay');
+
+function openSettings() {
+  settingsSidebar.classList.add('open');
+  settingsOverlay.classList.add('open');
+}
+function closeSettings() {
+  settingsSidebar.classList.remove('open');
+  settingsOverlay.classList.remove('open');
+}
+
+settingsBtn.addEventListener('click', openSettings);
+settingsClose.addEventListener('click', closeSettings);
+settingsOverlay.addEventListener('click', closeSettings);
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') closeSettings();
+});
+
+// ── Theme toggle ─────────────────────────────────────────
+const themeToggle = document.getElementById('themeToggle');
+themeToggle.checked = document.documentElement.classList.contains('light');
+
+themeToggle.addEventListener('change', function() {
+  if (this.checked) {
+    document.documentElement.classList.add('light');
+    localStorage.setItem('vt-theme', 'light');
+  } else {
+    document.documentElement.classList.remove('light');
+    localStorage.setItem('vt-theme', 'dark');
+  }
+});
+
+// ── Language select ──────────────────────────────────────
+const langSelect = document.getElementById('langSelect');
+langSelect.value = localStorage.getItem('vt-lang') || 'fr';
+langSelect.addEventListener('change', function() {
+  localStorage.setItem('vt-lang', this.value);
+});
+</script>
 </body>
 </html>
