@@ -208,7 +208,7 @@
         {% endif %}
       </div>
       {% else %}
-      <div style="font-size:12px; color:var(--txt-3);">Score CVSSv3 non disponible</div>
+      <div style="font-size:12px; color:var(--txt-3);">Advisory manquant — chargez un fichier Advisory plus récent pour obtenir les priorités P1/P2/P3</div>
       {% endif %}
 
       <!-- Top statuses (compact) -->
@@ -450,7 +450,7 @@
               {% if e.priority == 'P1' %}<span class="badge badge-p1">P1</span>
               {% elif e.priority == 'P2' %}<span class="badge badge-p2">P2</span>
               {% elif e.priority == 'P3' %}<span class="badge badge-p3">P3</span>
-              {% else %}<span class="cell-dim">—</span>{% endif %}
+              {% else %}<span class="cell-dim">Sans Advisory</span>{% endif %}
             </td>
             <td><span class="cell-mono">{{ e.reference or '—' }}</span></td>
             <td>
