@@ -526,154 +526,216 @@ def advisory_page(request: Request, msg: str = "", db=Depends(get_db)):
     })
 
 
-def _process_advisory_import(content: bytes) -> None:
-    """Traitement Advisory en arrière-plan (BackgroundTask)."""
-    db = _db
-    _job_set(status="running", detail="Lecture du fichier Excel…", msg="")
+def _flush_batch(db, batch: dict) -> tuple[int, int, list]:
+    """Écrit un batch de docs Advisory en base.
 
-    try:
-        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
-    except Exception as e:
-        _job_set(status="error", msg=f"Erreur lecture fichier : {e}", detail="")
-        return
+    - Vérifie chaque reference_note : insert si absent, replace si version plus haute.
+    - Les nouveaux documents sont groupés en insert_many (un seul aller-retour réseau).
+    - Retourne (added, updated, inserted_ids) pour le suivi du rollback.
+    """
+    to_insert: list = []
+    inserted_ids: list = []
+    updated = 0
 
-    ws = wb.active
-    total_rows = max(ws.max_row - 1, 0)
-    _job_set(detail=f"Détection du format ({total_rows} lignes)…")
-
-    doc = db.sap_notes.find_one({}, sort=[("advisory_release", DESCENDING)])
-    max_release = doc["advisory_release"] if doc else None
-
-    headers = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
-    col = {h: i for i, h in enumerate(headers)}
-
-    if "Nombre" in col:
-        fmt = "fr"
-    elif "Number" in col or "Reference Note" in col:
-        fmt = "en"
-    else:
-        _job_set(status="error",
-                 msg="Format non reconnu (colonne 'Number' / 'Nombre' / 'Reference Note' attendue)",
-                 detail="")
-        return
-
-    def _s(v):
-        return str(v).strip() if v is not None else None
-
-    def _get(row, *names):
-        for name in names:
-            idx = col.get(name)
-            if idx is not None:
-                return row[idx] if idx < len(row) else None
-        for name in names:
-            pfx = name.lower()
-            for h, idx in col.items():
-                if h.lower().startswith(pfx) and idx < len(row):
-                    return row[idx]
-        return None
-
-    def _cvss(raw):
-        if raw is None or raw == "-":
-            return None
-        if isinstance(raw, str):
-            try:
-                return float(raw.replace(",", "."))
-            except Exception:
-                return None
-        try:
-            return float(raw)
-        except Exception:
-            return None
-
-    fmt_label = "SAP for Me" if fmt == "fr" else "anglais"
-    _job_set(detail=f"Traitement de {total_rows} lignes (format {fmt_label})…")
-
-    new_rows: dict[int, dict] = {}
-    skipped = 0
-
-    for row in ws.iter_rows(min_row=2, values_only=True):
-        if fmt == "en":
-            advisory_release = format_advisory_release(_get(row, "Advisory Release"))
-        else:
-            advisory_release = format_advisory_release(_get(row, "Date/Heure de validation"))
-
-        if not advisory_release:
-            continue
-        if max_release and advisory_release <= max_release:
-            skipped += 1
-            continue
-
-        raw_ref = _get(row, "Number", "Reference Note") if fmt == "en" else _get(row, "Nombre")
-        if raw_ref is None:
-            continue
-        try:
-            reference_note = int(raw_ref)
-        except (ValueError, TypeError):
-            continue
-
-        if fmt == "en":
-            try:
-                version = int(_get(row, "Version") or 0)
-            except (ValueError, TypeError):
-                version = 0
-
-            data = {
-                "advisory_release":    advisory_release,
-                "sap_component":       _s(_get(row, "SAP Component")),
-                "reference_note":      reference_note,
-                "version":             version,
-                "title":               _s(_get(row, "Title")),
-                "category":            _s(_get(row, "Category")),
-                "priority_sap":        _s(_get(row, "Priority")),
-                "cvss_v3_base_score":  _cvss(_get(row, "CVSSv3 Base Score*", "CVSSv3 Base Score")),
-                "correction_type":     _s(_get(row, "Correction type")),
-                "recommended_implementation_process": _s(_get(row, "Recommended implementation process")),
-                "downtime_required":   _s(_get(row, "Downtime required**", "Downtime required")),
-                "cve":                 _s(_get(row, "CVE")),
-                "type":                _s(_get(row, "Type of vulnerability addressed")),
-                "solution_short":      _s(_get(row, "Solution [short]")),
-                "workaround":          _s(_get(row, "Workaround")),
-            }
-            if reference_note not in new_rows or version > new_rows[reference_note]["version"]:
-                new_rows[reference_note] = data
-        else:
-            categorie = _s(_get(row, "Catégorie"))
-            data = {
-                "advisory_release":    advisory_release,
-                "sap_component":       _s(_get(row, "Composant SAP")),
-                "reference_note":      reference_note,
-                "version":             0,
-                "title":               _s(_get(row, "Titre")),
-                "category":            categorie,
-                "priority_sap":        _s(_get(row, "Priorité")),
-                "cvss_v3_base_score":  _cvss(_get(row, "Score CVSS")),
-                "correction_type":     categorie,
-                "recommended_implementation_process": None,
-                "downtime_required":   None,
-                "cve":                 None,
-                "type":                None,
-                "solution_short":      None,
-                "workaround":          None,
-            }
-            if reference_note not in new_rows:
-                new_rows[reference_note] = data
-
-    _job_set(detail=f"Écriture de {len(new_rows)} notes en base…")
-
-    added = updated = 0
-    for ref, data in new_rows.items():
-        existing = db.sap_notes.find_one({"reference_note": ref})
+    for ref, data in batch.items():
+        existing = db.sap_notes.find_one({"reference_note": ref}, {"_id": 1, "version": 1})
         if existing:
             if data["version"] > existing.get("version", 0):
                 db.sap_notes.replace_one({"reference_note": ref}, data)
                 updated += 1
         else:
-            db.sap_notes.insert_one(data)
-            added += 1
+            to_insert.append(data)
 
-    apply_dedup(db)
-    msg = f"{added} notes ajoutées, {updated} mises à jour, {skipped} ignorées (format {fmt_label})"
-    _job_set(status="done", msg=msg, detail="")
+    if to_insert:
+        result = db.sap_notes.insert_many(to_insert, ordered=False)
+        inserted_ids = list(result.inserted_ids)
+
+    return len(to_insert), updated, inserted_ids
+
+
+def _process_advisory_import(content: bytes) -> None:
+    """Traitement Advisory en arrière-plan (BackgroundTask).
+
+    Optimisations mémoire :
+    - read_only=True  → openpyxl streaming XML, pas de chargement en RAM du classeur entier
+    - Batch de 100    → accumule 100 entrées uniques avant d'écrire, libère le buffer
+    - insert_many     → un seul aller-retour MongoDB par batch
+
+    Rollback manuel : les _id insérés sont trackés ; en cas d'exception,
+    delete_many les supprime. (Les transactions multi-documents MongoDB
+    nécessitent un replica set — incompatible avec un déploiement standalone.)
+    """
+    db = _db
+    wb = None
+    inserted_ids: list = []  # pour le rollback
+
+    _job_set(status="running", detail="Lecture du fichier Excel…", msg="")
+
+    try:
+        # read_only=True : parser XML streaming — n'alloue pas tout le classeur en RAM
+        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True, read_only=True)
+        ws = wb.active
+
+        _job_set(detail="Détection du format…")
+        doc = db.sap_notes.find_one({}, sort=[("advisory_release", DESCENDING)])
+        max_release = doc["advisory_release"] if doc else None
+
+        # Lecture de la ligne d'en-tête via l'itérateur (compatible read_only)
+        rows_iter = ws.iter_rows(values_only=True)
+        header_row = next(rows_iter, None)
+        if header_row is None:
+            _job_set(status="error", msg="Fichier vide ou illisible", detail="")
+            return
+
+        headers = [str(v).strip() if v is not None else "" for v in header_row]
+        col = {h: i for i, h in enumerate(headers)}
+
+        if "Nombre" in col:
+            fmt = "fr"
+        elif "Number" in col or "Reference Note" in col:
+            fmt = "en"
+        else:
+            _job_set(status="error",
+                     msg="Format non reconnu (colonne 'Number' / 'Nombre' / 'Reference Note' attendue)",
+                     detail="")
+            return
+
+        fmt_label = "SAP for Me" if fmt == "fr" else "anglais"
+
+        def _s(v):
+            return str(v).strip() if v is not None else None
+
+        def _get(row, *names):
+            for name in names:
+                idx = col.get(name)
+                if idx is not None:
+                    return row[idx] if idx < len(row) else None
+            for name in names:
+                pfx = name.lower()
+                for h, idx in col.items():
+                    if h.lower().startswith(pfx) and idx < len(row):
+                        return row[idx]
+            return None
+
+        def _cvss(raw):
+            if raw is None or raw == "-":
+                return None
+            if isinstance(raw, str):
+                try:
+                    return float(raw.replace(",", "."))
+                except Exception:
+                    return None
+            try:
+                return float(raw)
+            except Exception:
+                return None
+
+        BATCH_SIZE = 100
+        batch: dict[int, dict] = {}   # reference_note → data (dédupliqué dans le batch)
+        added = updated = skipped = row_num = 0
+
+        _job_set(detail=f"Traitement des lignes (format {fmt_label})…")
+
+        for row in rows_iter:
+            row_num += 1
+
+            if fmt == "en":
+                advisory_release = format_advisory_release(_get(row, "Advisory Release"))
+            else:
+                advisory_release = format_advisory_release(_get(row, "Date/Heure de validation"))
+
+            if not advisory_release:
+                continue
+            if max_release and advisory_release <= max_release:
+                skipped += 1
+                continue
+
+            raw_ref = _get(row, "Number", "Reference Note") if fmt == "en" else _get(row, "Nombre")
+            if raw_ref is None:
+                continue
+            try:
+                reference_note = int(raw_ref)
+            except (ValueError, TypeError):
+                continue
+
+            if fmt == "en":
+                try:
+                    version = int(_get(row, "Version") or 0)
+                except (ValueError, TypeError):
+                    version = 0
+
+                data = {
+                    "advisory_release":    advisory_release,
+                    "sap_component":       _s(_get(row, "SAP Component")),
+                    "reference_note":      reference_note,
+                    "version":             version,
+                    "title":               _s(_get(row, "Title")),
+                    "category":            _s(_get(row, "Category")),
+                    "priority_sap":        _s(_get(row, "Priority")),
+                    "cvss_v3_base_score":  _cvss(_get(row, "CVSSv3 Base Score*", "CVSSv3 Base Score")),
+                    "correction_type":     _s(_get(row, "Correction type")),
+                    "recommended_implementation_process": _s(_get(row, "Recommended implementation process")),
+                    "downtime_required":   _s(_get(row, "Downtime required**", "Downtime required")),
+                    "cve":                 _s(_get(row, "CVE")),
+                    "type":                _s(_get(row, "Type of vulnerability addressed")),
+                    "solution_short":      _s(_get(row, "Solution [short]")),
+                    "workaround":          _s(_get(row, "Workaround")),
+                }
+                if reference_note not in batch or version > batch[reference_note]["version"]:
+                    batch[reference_note] = data
+            else:
+                categorie = _s(_get(row, "Catégorie"))
+                data = {
+                    "advisory_release":    advisory_release,
+                    "sap_component":       _s(_get(row, "Composant SAP")),
+                    "reference_note":      reference_note,
+                    "version":             0,
+                    "title":               _s(_get(row, "Titre")),
+                    "category":            categorie,
+                    "priority_sap":        _s(_get(row, "Priorité")),
+                    "cvss_v3_base_score":  _cvss(_get(row, "Score CVSS")),
+                    "correction_type":     categorie,
+                    "recommended_implementation_process": None,
+                    "downtime_required":   None,
+                    "cve":                 None,
+                    "type":                None,
+                    "solution_short":      None,
+                    "workaround":          None,
+                }
+                if reference_note not in batch:
+                    batch[reference_note] = data
+
+            # Flush dès que le batch atteint BATCH_SIZE entrées uniques
+            if len(batch) >= BATCH_SIZE:
+                a, u, ids = _flush_batch(db, batch)
+                added += a; updated += u; inserted_ids.extend(ids)
+                batch.clear()
+                _job_set(detail=f"{row_num} lignes lues — {added} ajoutées, {updated} mises à jour…")
+
+        # Flush du reste
+        if batch:
+            a, u, ids = _flush_batch(db, batch)
+            added += a; updated += u; inserted_ids.extend(ids)
+
+        _job_set(detail="Déduplication finale…")
+        apply_dedup(db)
+
+        msg = f"{added} notes ajoutées, {updated} mises à jour, {skipped} ignorées (format {fmt_label})"
+        _job_set(status="done", msg=msg, detail="")
+
+    except Exception as e:
+        # Rollback : supprime tous les documents nouvellement insérés
+        if inserted_ids:
+            try:
+                db.sap_notes.delete_many({"_id": {"$in": inserted_ids}})
+            except Exception:
+                pass
+        _job_set(status="error",
+                 msg=f"Erreur — rollback de {len(inserted_ids)} document(s) inséré(s) : {e}",
+                 detail="")
+    finally:
+        if wb is not None:
+            wb.close()
 
 
 @app.post("/advisory/upload")
