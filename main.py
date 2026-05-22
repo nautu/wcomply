@@ -36,9 +36,26 @@ def get_db():
 
 
 # ── App ───────────────────────────────────────────────────────
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+
 app = FastAPI(title="VulnTrack")
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+class UploadSizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        cl = request.headers.get("content-length")
+        if cl and int(cl) > MAX_UPLOAD_BYTES:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                {"detail": f"Fichier trop volumineux — limite : {MAX_UPLOAD_BYTES // 1024 // 1024} MB"},
+                status_code=413,
+            )
+        return await call_next(request)
+
+
+app.add_middleware(UploadSizeLimitMiddleware)
 
 
 # ── Auth utilities ────────────────────────────────────────────
