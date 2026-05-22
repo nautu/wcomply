@@ -78,30 +78,31 @@ def _init_admin():
         print("")
 
 
-# ── Auth Middleware ───────────────────────────────────────────
-
-class AuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-        if path == "/login" or path.startswith("/static/"):
-            return await call_next(request)
-
-        token = request.cookies.get("vt_token")
-        if not token:
-            return RedirectResponse("/login", status_code=302)
-
-        try:
-            payload = _decode_token(token)
-            request.state.user = payload
-        except JWTError:
-            resp = RedirectResponse("/login", status_code=302)
-            resp.delete_cookie("vt_token")
-            return resp
-
-        return await call_next(request)
-
-
-app.add_middleware(AuthMiddleware)
+# ── Auth Middleware — DÉSACTIVÉ (bypass temporaire) ───────────
+# Pour réactiver : décommenter le bloc ci-dessous et supprimer
+# le dict _BYPASS_USER dans get_current_user / require_admin.
+#
+# class AuthMiddleware(BaseHTTPMiddleware):
+#     async def dispatch(self, request: Request, call_next):
+#         path = request.url.path
+#         if path == "/login" or path.startswith("/static/"):
+#             return await call_next(request)
+#
+#         token = request.cookies.get("vt_token")
+#         if not token:
+#             return RedirectResponse("/login", status_code=302)
+#
+#         try:
+#             payload = _decode_token(token)
+#             request.state.user = payload
+#         except JWTError:
+#             resp = RedirectResponse("/login", status_code=302)
+#             resp.delete_cookie("vt_token")
+#             return resp
+#
+#         return await call_next(request)
+#
+# app.add_middleware(AuthMiddleware)
 
 
 # ── Startup ───────────────────────────────────────────────────
@@ -135,13 +136,20 @@ def tpl(request: Request, name: str, ctx: Optional[dict] = None):
     return templates.TemplateResponse(request, name, data)
 
 
+# Bypass temporaire : toutes les routes sont ouvertes sans login.
+# Pour réactiver l'auth, remplacer ces deux fonctions par :
+#   def get_current_user(request): return getattr(request.state, "user", {})
+#   def require_admin(user=Depends(get_current_user)):
+#       if user.get("role") != "admin": raise HTTPException(403)
+#       return user
+_BYPASS_USER = {"sub": "admin", "role": "admin"}
+
+
 def get_current_user(request: Request) -> dict:
-    return getattr(request.state, "user", {})
+    return _BYPASS_USER
 
 
 def require_admin(user: dict = Depends(get_current_user)):
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Accès réservé aux administrateurs")
     return user
 
 
@@ -323,46 +331,41 @@ def _client_summary(entries: list, client: str) -> dict:
     }
 
 
-# ── Routes : Authentification ─────────────────────────────────
-
-@app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request, error: str = ""):
-    token = request.cookies.get("vt_token")
-    if token:
-        try:
-            _decode_token(token)
-            return RedirectResponse("/", status_code=302)
-        except JWTError:
-            pass
-    return templates.TemplateResponse(request, "login.html",
-                                      {"error": error, "current_user": {}})
-
-
-@app.post("/login")
-async def login(request: Request, db=Depends(get_db)):
-    form     = await request.form()
-    username = str(form.get("username", "")).strip()
-    password = str(form.get("password", ""))
-
-    user_doc = db.users.find_one({"username": username})
-    if not user_doc or not _verify_pw(password, user_doc["password_hash"]):
-        return templates.TemplateResponse(request, "login.html", {
-            "error": "Identifiants incorrects",
-            "current_user": {},
-        }, status_code=401)
-
-    token = _create_token(user_doc["username"], user_doc["role"])
-    resp  = RedirectResponse("/", status_code=303)
-    resp.set_cookie("vt_token", token, httponly=True, samesite="lax",
-                    max_age=TOKEN_HOURS * 3600)
-    return resp
-
-
-@app.post("/logout")
-def logout():
-    resp = RedirectResponse("/login", status_code=303)
-    resp.delete_cookie("vt_token")
-    return resp
+# ── Routes : Authentification — DÉSACTIVÉES (bypass temporaire) ─
+# Pour réactiver, décommenter ce bloc et rétablir le middleware + dépendances.
+#
+# @app.get("/login", response_class=HTMLResponse)
+# def login_page(request: Request, error: str = ""):
+#     token = request.cookies.get("vt_token")
+#     if token:
+#         try:
+#             _decode_token(token)
+#             return RedirectResponse("/", status_code=302)
+#         except JWTError:
+#             pass
+#     return templates.TemplateResponse(request, "login.html",
+#                                       {"error": error, "current_user": {}})
+#
+# @app.post("/login")
+# async def login(request: Request, db=Depends(get_db)):
+#     form     = await request.form()
+#     username = str(form.get("username", "")).strip()
+#     password = str(form.get("password", ""))
+#     user_doc = db.users.find_one({"username": username})
+#     if not user_doc or not _verify_pw(password, user_doc["password_hash"]):
+#         return templates.TemplateResponse(request, "login.html", {
+#             "error": "Identifiants incorrects", "current_user": {}}, status_code=401)
+#     token = _create_token(user_doc["username"], user_doc["role"])
+#     resp  = RedirectResponse("/", status_code=303)
+#     resp.set_cookie("vt_token", token, httponly=True, samesite="lax",
+#                     max_age=TOKEN_HOURS * 3600)
+#     return resp
+#
+# @app.post("/logout")
+# def logout():
+#     resp = RedirectResponse("/login", status_code=303)
+#     resp.delete_cookie("vt_token")
+#     return resp
 
 
 # ── Routes : Admin ────────────────────────────────────────────
