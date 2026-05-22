@@ -25,6 +25,9 @@
 </div>
 {% endif %}
 
+<!-- ── Statut import arrière-plan ──────────────────── -->
+<div id="import-status-box" style="display:none; margin-bottom:20px;"></div>
+
 <!-- ── Release status banner ──────────────────────── -->
 <div class="release-banner">
   <div class="release-banner-left">
@@ -262,5 +265,81 @@ function updateLabel(input) {
     label.textContent = input.files[0].name;
   }
 }
+
+// ── Import status polling ────────────────────────────────────
+const statusBox = document.getElementById('import-status-box');
+let pollTimer = null;
+
+function renderStatus(data) {
+  const { status, msg, detail } = data;
+  if (status === 'idle') { statusBox.style.display = 'none'; return; }
+
+  statusBox.style.display = 'block';
+
+  if (status === 'running') {
+    statusBox.innerHTML =
+      '<div class="alert alert-info" style="display:flex;align-items:center;gap:12px;">' +
+        '<svg class="spin" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>' +
+        '<div>' +
+          '<strong>Import en cours…</strong>' +
+          (detail ? '<div style="font-size:12px;margin-top:2px;opacity:.8;">' + detail + '</div>' : '') +
+        '</div>' +
+      '</div>';
+  } else if (status === 'done') {
+    statusBox.innerHTML =
+      '<div class="alert alert-success" style="display:flex;align-items:center;gap:10px;">' +
+        '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>' +
+        '<span>' + msg + '</span>' +
+      '</div>';
+    stopPolling();
+    // Rafraîchit les stats de la page sans réinitialiser le statut
+    setTimeout(() => location.replace('/advisory'), 2000);
+  } else if (status === 'error') {
+    statusBox.innerHTML =
+      '<div class="alert" style="background:var(--p1-bg);border:1px solid var(--p1-border);color:#fca5a5;display:flex;align-items:center;gap:10px;">' +
+        '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>' +
+        '<span>' + msg + '</span>' +
+      '</div>';
+    stopPolling();
+  }
+}
+
+async function pollStatus() {
+  try {
+    const resp = await fetch('/advisory/import-status');
+    const data = await resp.json();
+    renderStatus(data);
+    if (data.status !== 'running') stopPolling();
+  } catch (e) { /* réseau ko — on réessaie */ }
+}
+
+function startPolling() {
+  pollStatus();
+  pollTimer = setInterval(pollStatus, 3000);
+}
+
+function stopPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+// Au chargement : démarre le polling si ?importing=1 ou si un job tourne déjà
+(async function init() {
+  const importing = new URLSearchParams(location.search).get('importing') === '1';
+  const resp = await fetch('/advisory/import-status');
+  const data = await resp.json();
+
+  if (importing || data.status === 'running') {
+    renderStatus(data);
+    if (data.status === 'running') startPolling();
+  } else if (data.status === 'done' || data.status === 'error') {
+    // Résultat du dernier import (si la page vient d'être chargée après un import)
+    if (importing) renderStatus(data);
+  }
+})();
 </script>
+
+<style>
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 1s linear infinite; flex-shrink:0; }
+</style>
 {% endblock %}

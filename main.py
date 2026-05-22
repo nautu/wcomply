@@ -7,7 +7,7 @@ from typing import Optional
 import openpyxl
 from bson import ObjectId
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -33,6 +33,19 @@ pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__truncate_e
 
 def get_db():
     return _db
+
+
+# ── Import job (statut persisté en base, partagé entre workers) ─
+_JOB_ID = "advisory_import"
+
+
+def _job_get() -> dict:
+    doc = _db.jobs.find_one({"_id": _JOB_ID})
+    return doc or {"status": "idle", "msg": "", "detail": ""}
+
+
+def _job_set(**fields):
+    _db.jobs.update_one({"_id": _JOB_ID}, {"$set": fields}, upsert=True)
 
 
 # ── App ───────────────────────────────────────────────────────
@@ -513,42 +526,45 @@ def advisory_page(request: Request, msg: str = "", db=Depends(get_db)):
     })
 
 
-@app.post("/advisory/upload")
-async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
-    content = await file.read()
+def _process_advisory_import(content: bytes) -> None:
+    """Traitement Advisory en arrière-plan (BackgroundTask)."""
+    db = _db
+    _job_set(status="running", detail="Lecture du fichier Excel…", msg="")
+
     try:
         wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
     except Exception as e:
-        return RedirectResponse(f"/advisory?msg=Erreur+fichier:+{e}", status_code=303)
+        _job_set(status="error", msg=f"Erreur lecture fichier : {e}", detail="")
+        return
 
     ws = wb.active
+    total_rows = max(ws.max_row - 1, 0)
+    _job_set(detail=f"Détection du format ({total_rows} lignes)…")
+
     doc = db.sap_notes.find_one({}, sort=[("advisory_release", DESCENDING)])
     max_release = doc["advisory_release"] if doc else None
 
-    # Détection du format à partir de la ligne d'en-têtes
     headers = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
     col = {h: i for i, h in enumerate(headers)}
 
     if "Nombre" in col:
-        fmt = "fr"                  # SAP for Me (français)
+        fmt = "fr"
     elif "Number" in col or "Reference Note" in col:
-        fmt = "en"                  # Format anglais complet (fichier SAP standard)
+        fmt = "en"
     else:
-        return RedirectResponse(
-            "/advisory?msg=Format+non+reconnu+(colonne+'Number'+'Nombre'+'Reference+Note'+attendue)",
-            status_code=303,
-        )
+        _job_set(status="error",
+                 msg="Format non reconnu (colonne 'Number' / 'Nombre' / 'Reference Note' attendue)",
+                 detail="")
+        return
 
     def _s(v):
         return str(v).strip() if v is not None else None
 
     def _get(row, *names):
-        """Lookup par nom de colonne — essaie les noms exacts puis le préfixe."""
         for name in names:
             idx = col.get(name)
             if idx is not None:
                 return row[idx] if idx < len(row) else None
-        # fallback : correspondance par préfixe (gère les astérisques, parenthèses…)
         for name in names:
             pfx = name.lower()
             for h, idx in col.items():
@@ -569,11 +585,13 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
         except Exception:
             return None
 
+    fmt_label = "SAP for Me" if fmt == "fr" else "anglais"
+    _job_set(detail=f"Traitement de {total_rows} lignes (format {fmt_label})…")
+
     new_rows: dict[int, dict] = {}
     skipped = 0
 
     for row in ws.iter_rows(min_row=2, values_only=True):
-        # ── Date de release ──────────────────────────────────────
         if fmt == "en":
             advisory_release = format_advisory_release(_get(row, "Advisory Release"))
         else:
@@ -585,7 +603,6 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
             skipped += 1
             continue
 
-        # ── Numéro de note ───────────────────────────────────────
         raw_ref = _get(row, "Number", "Reference Note") if fmt == "en" else _get(row, "Nombre")
         if raw_ref is None:
             continue
@@ -594,7 +611,6 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
         except (ValueError, TypeError):
             continue
 
-        # ── Construction du document ─────────────────────────────
         if fmt == "en":
             try:
                 version = int(_get(row, "Version") or 0)
@@ -621,7 +637,6 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
             if reference_note not in new_rows or version > new_rows[reference_note]["version"]:
                 new_rows[reference_note] = data
         else:
-            # Format SAP for Me (français) — inchangé
             categorie = _s(_get(row, "Catégorie"))
             data = {
                 "advisory_release":    advisory_release,
@@ -643,6 +658,8 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
             if reference_note not in new_rows:
                 new_rows[reference_note] = data
 
+    _job_set(detail=f"Écriture de {len(new_rows)} notes en base…")
+
     added = updated = 0
     for ref, data in new_rows.items():
         existing = db.sap_notes.find_one({"reference_note": ref})
@@ -655,9 +672,29 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
             added += 1
 
     apply_dedup(db)
-    fmt_label = "SAP for Me" if fmt == "fr" else "anglais"
     msg = f"{added} notes ajoutées, {updated} mises à jour, {skipped} ignorées (format {fmt_label})"
-    return RedirectResponse(f"/advisory?msg={msg}", status_code=303)
+    _job_set(status="done", msg=msg, detail="")
+
+
+@app.post("/advisory/upload")
+async def upload_advisory(background_tasks: BackgroundTasks,
+                          file: UploadFile = File(...)):
+    job = _job_get()
+    if job.get("status") == "running":
+        return RedirectResponse("/advisory?importing=1", status_code=303)
+
+    content = await file.read()
+    _job_set(status="running", msg="", detail="Démarrage…")
+    background_tasks.add_task(_process_advisory_import, content)
+    return RedirectResponse("/advisory?importing=1", status_code=303)
+
+
+@app.get("/advisory/import-status")
+def advisory_import_status():
+    job = _job_get()
+    return {"status": job.get("status", "idle"),
+            "msg":    job.get("msg", ""),
+            "detail": job.get("detail", "")}
 
 
 # ── Routes : FRun ─────────────────────────────────────────────
