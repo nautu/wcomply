@@ -146,6 +146,12 @@ def create_indexes():
         _db.frun_data.create_index([("check_ref", ASCENDING)])
         _db.users.create_index([("username", ASCENDING)], unique=True)
         _init_admin()
+        # Un job "running" au démarrage est forcément orphelin (service redémarré
+        # pendant un import) — on le remet à idle pour débloquer l'UI.
+        _db.jobs.update_one(
+            {"_id": _JOB_ID, "status": "running"},
+            {"$set": {"status": "idle", "msg": "", "detail": ""}},
+        )
     except Exception as e:
         print(f"[startup] MongoDB non disponible ({e}). Les index seront créés à la première connexion.")
 
