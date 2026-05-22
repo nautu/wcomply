@@ -187,8 +187,7 @@
       </div>
     </div>
 
-    <!-- Zone de danger (admin uniquement) -->
-    {% if current_user and current_user.role == 'admin' %}
+    <!-- Zone de danger -->
     <div class="settings-group settings-group-danger">
       <div class="settings-group-title">Zone de danger</div>
       <p class="settings-danger-desc">
@@ -224,7 +223,6 @@
         </div>
       </div>
     </div>
-    {% endif %}
 
   </div><!-- /settings-body -->
 </div><!-- /settings-sidebar -->
