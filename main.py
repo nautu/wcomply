@@ -258,9 +258,12 @@ def build_merged_entries(db, client=None, sid=None, reference=None) -> list:
             "policy":                             frun.get("policy"),
             "correction_type":                    adv.get("correction_type")                    if adv else None,
             "reference":                          adv.get("reference_note")                     if adv else frun.get("check_ref"),
-            "type":                               adv.get("category")                           if adv else None,
+            "cve":                                adv.get("cve")                                if adv else None,
+            "type":                               (adv.get("type") or adv.get("category"))      if adv else None,
             "recommended_implementation_process": adv.get("recommended_implementation_process") if adv else None,
             "downtime_required":                  adv.get("downtime_required")                  if adv else None,
+            "solution_short":                     adv.get("solution_short")                     if adv else None,
+            "workaround":                         adv.get("workaround")                         if adv else None,
             "landscape":          frun.get("landscape"),
             "configuration_item": frun.get("configuration_item"),
             "value":              frun.get("value"),
@@ -507,27 +510,37 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
 
     # Détection du format à partir de la ligne d'en-têtes
     headers = [str(c.value).strip() if c.value is not None else "" for c in ws[1]]
-    if "Nombre" in headers:
-        fmt = "fr"
-        col = {h: i for i, h in enumerate(headers)}
-    elif "Reference Note" in headers:
-        fmt = "en"
-        col = None
+    col = {h: i for i, h in enumerate(headers)}
+
+    if "Nombre" in col:
+        fmt = "fr"                  # SAP for Me (français)
+    elif "Number" in col or "Reference Note" in col:
+        fmt = "en"                  # Format anglais complet (fichier SAP standard)
     else:
         return RedirectResponse(
-            "/advisory?msg=Format+non+reconnu+(colonne+'Nombre'+ou+'Reference+Note'+attendue)",
+            "/advisory?msg=Format+non+reconnu+(colonne+'Number'+'Nombre'+'Reference+Note'+attendue)",
             status_code=303,
         )
 
     def _s(v):
         return str(v).strip() if v is not None else None
 
-    def _get(row, name):
-        idx = col.get(name) if col else None
-        return row[idx] if idx is not None and idx < len(row) else None
+    def _get(row, *names):
+        """Lookup par nom de colonne — essaie les noms exacts puis le préfixe."""
+        for name in names:
+            idx = col.get(name)
+            if idx is not None:
+                return row[idx] if idx < len(row) else None
+        # fallback : correspondance par préfixe (gère les astérisques, parenthèses…)
+        for name in names:
+            pfx = name.lower()
+            for h, idx in col.items():
+                if h.lower().startswith(pfx) and idx < len(row):
+                    return row[idx]
+        return None
 
     def _cvss(raw):
-        if raw is None:
+        if raw is None or raw == "-":
             return None
         if isinstance(raw, str):
             try:
@@ -543,8 +556,9 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
     skipped = 0
 
     for row in ws.iter_rows(min_row=2, values_only=True):
+        # ── Date de release ──────────────────────────────────────
         if fmt == "en":
-            advisory_release = format_advisory_release(row[0])
+            advisory_release = format_advisory_release(_get(row, "Advisory Release"))
         else:
             advisory_release = format_advisory_release(_get(row, "Date/Heure de validation"))
 
@@ -554,7 +568,8 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
             skipped += 1
             continue
 
-        raw_ref = row[2] if fmt == "en" else _get(row, "Nombre")
+        # ── Numéro de note ───────────────────────────────────────
+        raw_ref = _get(row, "Number", "Reference Note") if fmt == "en" else _get(row, "Nombre")
         if raw_ref is None:
             continue
         try:
@@ -562,28 +577,34 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
         except (ValueError, TypeError):
             continue
 
+        # ── Construction du document ─────────────────────────────
         if fmt == "en":
             try:
-                version = int(row[3]) if row[3] is not None else 0
+                version = int(_get(row, "Version") or 0)
             except (ValueError, TypeError):
                 version = 0
 
             data = {
                 "advisory_release":    advisory_release,
-                "sap_component":       _s(row[1]),
+                "sap_component":       _s(_get(row, "SAP Component")),
                 "reference_note":      reference_note,
                 "version":             version,
-                "title":               _s(row[4]),
-                "category":            _s(row[5]),
-                "priority_sap":        _s(row[6]),
-                "cvss_v3_base_score":  _cvss(row[11]),
-                "correction_type":     _s(row[34]),
-                "recommended_implementation_process": _s(row[35]),
-                "downtime_required":   _s(row[36]),
+                "title":               _s(_get(row, "Title")),
+                "category":            _s(_get(row, "Category")),
+                "priority_sap":        _s(_get(row, "Priority")),
+                "cvss_v3_base_score":  _cvss(_get(row, "CVSSv3 Base Score*", "CVSSv3 Base Score")),
+                "correction_type":     _s(_get(row, "Correction type")),
+                "recommended_implementation_process": _s(_get(row, "Recommended implementation process")),
+                "downtime_required":   _s(_get(row, "Downtime required**", "Downtime required")),
+                "cve":                 _s(_get(row, "CVE")),
+                "type":                _s(_get(row, "Type of vulnerability addressed")),
+                "solution_short":      _s(_get(row, "Solution [short]")),
+                "workaround":          _s(_get(row, "Workaround")),
             }
             if reference_note not in new_rows or version > new_rows[reference_note]["version"]:
                 new_rows[reference_note] = data
         else:
+            # Format SAP for Me (français) — inchangé
             categorie = _s(_get(row, "Catégorie"))
             data = {
                 "advisory_release":    advisory_release,
@@ -597,6 +618,10 @@ async def upload_advisory(file: UploadFile = File(...), db=Depends(get_db)):
                 "correction_type":     categorie,
                 "recommended_implementation_process": None,
                 "downtime_required":   None,
+                "cve":                 None,
+                "type":                None,
+                "solution_short":      None,
+                "workaround":          None,
             }
             if reference_note not in new_rows:
                 new_rows[reference_note] = data
