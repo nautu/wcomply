@@ -1,6 +1,10 @@
 import io
+import logging
 import os
 import re
+import threading
+import time
+from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -17,6 +21,28 @@ from pymongo import ASCENDING, DESCENDING, MongoClient
 from starlette.middleware.base import BaseHTTPMiddleware
 
 load_dotenv()
+
+# ── Security logger ───────────────────────────────────────────
+
+def _setup_security_logger() -> logging.Logger:
+    logger = logging.getLogger("vulntrack.security")
+    logger.setLevel(logging.INFO)
+    log_dir = "/var/log/vulntrack"
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        fh = logging.FileHandler(f"{log_dir}/security.log")
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(fh)
+    except PermissionError:
+        pass  # fallback to stdout only
+    sh = logging.StreamHandler()
+    sh.setFormatter(logging.Formatter("%(asctime)s SECURITY %(message)s"))
+    logger.addHandler(sh)
+    return logger
+
+security_log = _setup_security_logger()
+
+_MONGO_OP_RE = re.compile(r'\$[a-zA-Z]')
 
 # ── Config ────────────────────────────────────────────────────
 MONGO_URL     = os.getenv("MONGO_URL", "mongodb://localhost:27017")
@@ -49,7 +75,7 @@ def _job_set(**fields):
 
 
 # ── App ───────────────────────────────────────────────────────
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
 
 app = FastAPI(title="VulnTrack")
 templates = Jinja2Templates(directory="templates")
@@ -69,6 +95,114 @@ class UploadSizeLimitMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(UploadSizeLimitMiddleware)
+
+
+# ── Security helpers ──────────────────────────────────────────
+
+XLSX_MAGIC = b'PK\x03\x04'
+_SUSPICIOUS_NAME_RE = re.compile(r'[/\\<>:"|?*\x00]|\.\.')
+
+_UPLOAD_WINDOWS: dict = defaultdict(list)
+_API_WINDOWS: dict = defaultdict(list)
+_rl_lock = threading.Lock()
+
+UPLOAD_LIMIT = 10
+UPLOAD_WINDOW = 3600  # 1 hour
+
+API_LIMIT = 100
+API_WINDOW = 60  # 1 minute
+
+_UPLOAD_PATHS = {"/advisory/upload", "/frun/upload"}
+
+
+def _get_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _check_rate_limit(store: dict, ip: str, limit: int, window: float) -> bool:
+    now = time.time()
+    with _rl_lock:
+        store[ip] = [t for t in store[ip] if now - t < window]
+        if len(store[ip]) >= limit:
+            return False
+        store[ip].append(now)
+        return True
+
+
+def _validate_xlsx(filename: str, content: bytes, ip: str) -> None:
+    if not filename.lower().endswith(".xlsx"):
+        security_log.warning(f"Upload rejected non-xlsx ip={ip} filename={filename!r}")
+        raise HTTPException(400, "Seuls les fichiers .xlsx sont acceptés")
+    if _SUSPICIOUS_NAME_RE.search(filename) or len(filename) > 255:
+        security_log.warning(f"Upload rejected suspicious filename ip={ip} filename={filename!r}")
+        raise HTTPException(400, "Nom de fichier non autorisé")
+    if not content.startswith(XLSX_MAGIC):
+        security_log.warning(f"Upload rejected invalid magic bytes ip={ip} filename={filename!r}")
+        raise HTTPException(400, "Format de fichier invalide (non reconnu comme xlsx)")
+
+
+def _sanitize_text(value: str, field: str = "") -> str:
+    """Reject MongoDB operator injection; strip whitespace."""
+    if not isinstance(value, str):
+        return value
+    if _MONGO_OP_RE.search(value):
+        security_log.warning(f"MongoDB operator injection attempt field={field!r} value={value[:100]!r}")
+        raise HTTPException(400, "Valeur non autorisée")
+    return value.strip()
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        qs = str(request.url.query)
+        path = request.url.path
+        if _MONGO_OP_RE.search(qs) or ".." in path:
+            ip = _get_client_ip(request)
+            security_log.warning(
+                f"Suspicious request ip={ip} method={request.method} "
+                f"path={path!r} qs={qs[:200]!r}"
+            )
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src https://fonts.gstatic.com"
+        )
+        return response
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        from fastapi.responses import JSONResponse
+        path = request.url.path
+        if path.startswith("/static/"):
+            return await call_next(request)
+        ip = _get_client_ip(request)
+        if request.method == "POST" and path in _UPLOAD_PATHS:
+            if not _check_rate_limit(_UPLOAD_WINDOWS, ip, UPLOAD_LIMIT, UPLOAD_WINDOW):
+                security_log.warning(f"Upload rate limit exceeded ip={ip}")
+                return JSONResponse(
+                    {"detail": "Trop de tentatives d'upload. Réessayez dans une heure."},
+                    status_code=429,
+                )
+        elif not _check_rate_limit(_API_WINDOWS, ip, API_LIMIT, API_WINDOW):
+            security_log.warning(f"API rate limit exceeded ip={ip} path={path!r}")
+            return JSONResponse(
+                {"detail": "Trop de requêtes. Réessayez dans une minute."},
+                status_code=429,
+            )
+        return await call_next(request)
+
+
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RateLimitMiddleware)
 
 
 # ── Auth utilities ────────────────────────────────────────────
@@ -743,13 +877,20 @@ def _process_advisory_import(content: bytes) -> None:
 
 
 @app.post("/advisory/upload")
-async def upload_advisory(background_tasks: BackgroundTasks,
+async def upload_advisory(request: Request, background_tasks: BackgroundTasks,
                           file: UploadFile = File(...)):
+    ip = _get_client_ip(request)
     job = _job_get()
     if job.get("status") == "running":
         return RedirectResponse("/advisory?importing=1", status_code=303)
 
     content = await file.read()
+    try:
+        _validate_xlsx(file.filename or "", content, ip)
+    except HTTPException as exc:
+        security_log.warning(f"Advisory upload rejected ip={ip} reason={exc.detail!r}")
+        return RedirectResponse(f"/advisory?msg={exc.detail}", status_code=303)
+
     _job_set(status="running", msg="", detail="Démarrage…")
     background_tasks.add_task(_process_advisory_import, content)
     return RedirectResponse("/advisory?importing=1", status_code=303)
@@ -777,11 +918,18 @@ def frun_page(request: Request, msg: str = "", db=Depends(get_db)):
 
 
 @app.post("/frun/upload")
-async def upload_frun(file: UploadFile = File(...), db=Depends(get_db)):
+async def upload_frun(request: Request, file: UploadFile = File(...), db=Depends(get_db)):
+    ip = _get_client_ip(request)
     content = await file.read()
+    try:
+        _validate_xlsx(file.filename or "", content, ip)
+    except HTTPException as exc:
+        security_log.warning(f"FRun upload rejected ip={ip} reason={exc.detail!r}")
+        return RedirectResponse(f"/frun?msg={exc.detail}", status_code=303)
     try:
         wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
     except Exception as e:
+        security_log.warning(f"FRun upload parse error ip={ip} filename={file.filename!r} error={e!r}")
         return RedirectResponse(f"/frun?msg=Erreur+fichier:+{e}", status_code=303)
 
     ws  = wb["Sheet1"] if "Sheet1" in wb.sheetnames else wb.active
@@ -826,6 +974,9 @@ def merged_view(
     client: str = "", sid: str = "", reference: str = "",
     db=Depends(get_db),
 ):
+    client    = _sanitize_text(client, "client")
+    sid       = _sanitize_text(sid, "sid")
+    reference = _sanitize_text(reference, "reference")
     entries = build_merged_entries(db, client or None, sid or None, reference or None)
     clients = sorted(db.frun_data.distinct("client"))
     return tpl(request, "merged.html", {
@@ -961,7 +1112,7 @@ def update_comment(entry_id: str, request_data: dict, db=Depends(get_db)):
     except Exception:
         raise HTTPException(status_code=400, detail="ID invalide")
 
-    comment = request_data.get("comment", "")
+    comment = _sanitize_text(request_data.get("comment", ""), "comment")
     result  = db.frun_data.update_one({"_id": oid}, {"$set": {"comment": comment}})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Entrée introuvable")
@@ -985,6 +1136,7 @@ def get_history(entry_id: str, db=Depends(get_db)):
 
 @app.get("/view", response_class=HTMLResponse)
 def view(request: Request, client: str = "", db=Depends(get_db)):
+    client = _sanitize_text(client, "client")
     all_clients = sorted(db.frun_data.distinct("client"))
 
     summary = []
