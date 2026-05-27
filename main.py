@@ -460,11 +460,9 @@ def delete_user(username: str, db=Depends(get_db),
 
 @app.post("/settings/reset-db")
 def reset_db(db=Depends(get_db), _: dict = Depends(require_admin)):
-    db.sap_notes.drop()
     db.frun_data.drop()
+    db.drop_collection("merged_view")
     try:
-        db.sap_notes.create_index([("reference_note",   ASCENDING)])
-        db.sap_notes.create_index([("advisory_release", ASCENDING)])
         db.frun_data.create_index([("client",    ASCENDING)])
         db.frun_data.create_index([("check_ref", ASCENDING)])
     except Exception:
